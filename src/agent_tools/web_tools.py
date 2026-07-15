@@ -108,6 +108,11 @@ class WebFetchTool:
             return {"error": f"web_fetch: unsupported URL scheme (only http/https): {url[:80]}", "exit_code": 1}
         if not low.startswith(("http://", "https://")):
             url = "https://" + url
+
+        # Hermes discipline: GitHub repo tree endpoints explode into recursive
+        # web_fetch storms (log evidence: 3724 tool blocks / ~600s). Cap listing
+        # and instruct the model to fetch only key files.
+        _gh_contents = "api.github.com/repos/" in low and "/contents" in low
         loop = asyncio.get_running_loop()
         try:
             def _fetch():
@@ -115,6 +120,7 @@ class WebFetchTool:
                 try:
                     sig = inspect.signature(fetch_webpage_content)
                     if "max_bytes" in sig.parameters:
+                        # Directory listings are small; keep soft budget
                         kwargs["max_bytes"] = max_bytes
                 except (TypeError, ValueError):
                     # Some deployed/test shims may not expose a signature.
@@ -138,6 +144,42 @@ class WebFetchTool:
             if err:
                 return {"error": f"web_fetch: {url}: {err}", "exit_code": 1}
             return {"error": f"web_fetch: {url}: no readable text content (not HTML, or the page needs JS/login)", "exit_code": 1}
+
+        # GitHub /contents JSON: truncate tree + anti-recursion policy
+        if _gh_contents:
+            try:
+                items = json.loads(text)
+                if isinstance(items, list):
+                    max_entries = 40
+                    lines = []
+                    for it in items[:max_entries]:
+                        if not isinstance(it, dict):
+                            continue
+                        name = it.get("name") or "?"
+                        typ = it.get("type") or "?"
+                        path = it.get("path") or name
+                        size = it.get("size")
+                        size_s = f" ({size}b)" if isinstance(size, int) else ""
+                        lines.append(f"- [{typ}] {path}{size_s}")
+                    more = len(items) - max_entries
+                    policy = (
+                        "POLICY (Hermes discipline):\n"
+                        "- Do NOT recursively fetch every folder under /contents.\n"
+                        "- Prefer: README*, package.json, pyproject.toml, Cargo.toml, "
+                        "go.mod, AGENTS.md, src/main.*, app entrypoints (max 5 files).\n"
+                        "- After those, summarize; stop fetching.\n"
+                        f"- Listed {min(len(items), max_entries)}/{len(items)} entries"
+                        + (f" ({more} omitted).\n" if more > 0 else ".\n")
+                    )
+                    output = (
+                        f"# GitHub contents listing\nSource: {url}\n\n"
+                        f"{policy}\n" + "\n".join(lines)
+                    )
+                    if len(output) > MAX_OUTPUT_CHARS:
+                        output = output[:MAX_OUTPUT_CHARS] + "\n\n[...truncated]"
+                    return {"output": output, "exit_code": 0}
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass  # fall through to normal HTML/text path
 
         # Tell the model when the download budget cut the body short and how
         # to get the rest, instead of silently presenting a partial page as

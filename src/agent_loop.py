@@ -9,6 +9,7 @@ The LLM decides when to use tools by writing fenced code blocks.
 import asyncio
 import collections
 import json
+import os
 import re
 import time
 import logging
@@ -112,6 +113,7 @@ _AGENT_RULES = """\
 - Only use tools when needed. Don't search for things you already know.
 - For web lookup/search/latest/current requests, use `web_search` or `web_fetch`. Do NOT use `bash`, `python`, `curl`, `requests`, or scraping code for web lookup unless web tools are disabled or already failed.
 - If `web_search` is listed in this prompt, web search is available. Do NOT tell the user search/web tools are unavailable.
+- For GitHub or file tree analysis: DO NOT recursively fetch every folder under /contents. Prefer README*, package.json, pyproject.toml, Cargo.toml, go.mod, AGENTS.md, src/main.*, app entrypoints (max 5 fetch tools). After those, summarize and stop fetching.
 - These exact tags execute automatically. For showing code examples, use ```shell, ```sh, ```py, etc. instead.
 - Multiple tool blocks per response OK. 60s timeout per tool, 10K char output limit.
 - Code/content >15 lines → ```create_document (NOT in chat). Short snippets OK in chat.
@@ -130,6 +132,20 @@ _AGENT_RULES = """\
 - User identity facts/preferences ("my name is <name>", "I live in <place>", "I prefer concise replies", "call me <name>") → use `manage_memory` with action=add. NEVER use `manage_contact` for facts about the user unless the user explicitly says to create/update a contact and provides contact details such as an email or phone.
 - "Create/add/write a note" / "notes" / "todos" / "remind me to X at <time>" → use `manage_notes`. Do NOT store notes in `manage_memory`; memory is for persistent facts/preferences about the user, not note content. For reminders, include a `due_date`; for todos, use `note_type=checklist` when appropriate.
 - "Do X every morning / daily / on a schedule / automatically" (e.g. "summarize my inbox every morning") → this is a request to CREATE A SCHEDULED TASK, not to do X once right now. Call `manage_tasks` with action=create (prompt = what to do, schedule + cron/time). Do NOT just perform the action inline this turn — the user wants it to recur. After creating, return a clickable `[Task name](#task-<id>)` link and tell them it'll run on schedule and show in the Tasks panel. If you also want to show a sample of this run, do that AFTER creating the task, not instead of it.
+
+## Hermes discipline (mandatory — applies to ALL tools, not just GitHub)
+- **Budget tools.** Prefer ≤8 tool calls for simple questions, ≤15 for multi-step work. Never flood the context with dozens of parallel fetches/reads.
+- **One best next step.** After tool results, either answer or take the single highest-value next call — not a batch of speculative calls.
+- **No identical retries.** Never re-call the same tool with the same arguments. If it failed, change args, use another tool, or declare blocked.
+- **Read before write.** Inspect existing state (list/read/search) before edit/create/delete.
+- **Summarize intermediate noise.** Do not paste raw multi-KB tool dumps into the final answer; extract what matters.
+- **Repo / codebase analysis (any source):** structure first → key config/docs (README, package manifests, entrypoints) → summarize. Max ~5 content fetches unless user demands deeper dive.
+- **Web research:** search once or twice, fetch only top sources (≤5 pages), then synthesize. No spidering whole sites.
+- **Filesystem:** `ls`/`glob`/`grep` to locate, then `read_file` only the files you need. Do not dump entire trees into chat.
+- **Shell (`bash`/`python`):** one purposeful command; check exit code; no blind retry loops. Prefer targeted tools over shell when a dedicated tool exists.
+- **Skills first.** If Available skills lists a relevant procedure, call `manage_skills` action=view before inventing steps.
+- **Stop conditions.** End when: (1) user request satisfied with evidence, (2) blocked with a clear reason, or (3) budget/loop limits hit — then give best partial answer. Never loop "just in case".
+- **Context hygiene.** Prefer short tool args and focused reads. Large outputs are truncated — plan around that instead of re-fetching the same blob.
 
 ## UI conventions
 - When you reference an entity by ID in your reply, render it as a STANDARD markdown link with a hash-prefixed anchor. The frontend converts these into clickable jump buttons:
@@ -2146,23 +2162,75 @@ def _build_base_prompt(
             from src.constants import DATA_DIR
             _sm = SkillsManager(DATA_DIR)
             active_tools = list(set(TOOL_SECTIONS.keys()) - set(disabled or []))
-            skill_idx = _sm.index_for(owner=owner, active_toolsets=active_tools)
-            if skill_idx:
-                lines = ["## Available skills",
-                         "Procedures the assistant should consult before doing domain work. "
-                         "Fetch the full procedure with `manage_skills` action=view name=<name> "
-                         "when one looks relevant. Entries tagged `(draft)` were written by the "
-                         "teacher-escalation loop after a prior failure — treat them as authoritative "
-                         "guidance; if you follow one and it works, that's a good signal the procedure "
-                         "is correct."]
-                by_cat: dict[str, list] = {}
-                for s in skill_idx:
-                    by_cat.setdefault(s["category"], []).append(s)
-                for cat in sorted(by_cat):
-                    lines.append(f"\n**{cat}**")
-                    for s in by_cat[cat]:
-                        badge = " *(draft)*" if s.get("status") == "draft" else ""
-                        lines.append(f"- `{s['name']}` — {s['description']}{badge}")
+            skill_idx = _sm.index_for(owner=owner, active_toolsets=active_tools) or []
+            lines = ["## Available skills",
+                     "Procedures the assistant should consult before doing domain work. "
+                     "Fetch Odysseus skills with `manage_skills` action=view name=<name> "
+                     "when one looks relevant. Entries tagged `(draft)` were written by the "
+                     "teacher-escalation loop after a prior failure — treat them as authoritative "
+                     "guidance; if you follow one and it works, that's a good signal the procedure "
+                     "is correct. Hermes bridge skills: use `read_file` on the listed path "
+                     "(SKILL.md) when relevant — they are read-only mirrors of Hermes procedures."]
+
+            # --- HERMES SKILL BRIDGE (read-only index) ---
+            # Docker: mount host skills at HERMES_SKILLS_DIR (default /hermes-skills)
+            try:
+                hermes_skills_dir = (
+                    os.environ.get("HERMES_SKILLS_DIR")
+                    or "/hermes-skills"
+                )
+                if not os.path.isdir(hermes_skills_dir):
+                    # Host/dev fallback (Windows Hermes home)
+                    _win = os.path.join(
+                        os.path.expanduser("~"), "AppData", "Local", "hermes", "skills"
+                    )
+                    if os.path.isdir(_win):
+                        hermes_skills_dir = _win
+                if os.path.isdir(hermes_skills_dir):
+                    import glob
+                    h_skills = []
+                    for md_path in glob.glob(
+                        os.path.join(hermes_skills_dir, "**", "SKILL.md"), recursive=True
+                    ):
+                        try:
+                            with open(md_path, "r", encoding="utf-8", errors="replace") as f:
+                                content = f.read(4096)
+                            nm = os.path.basename(os.path.dirname(md_path))
+                            desc = "Hermes skill"
+                            if content.startswith("---"):
+                                parts = content.split("---", 2)
+                                if len(parts) >= 3:
+                                    fm_text = parts[1]
+                                    for line in fm_text.splitlines():
+                                        ls = line.strip()
+                                        if ls.startswith("name:"):
+                                            nm = ls.split(":", 1)[1].strip().strip("\"'") or nm
+                                        elif ls.startswith("description:"):
+                                            desc = ls.split(":", 1)[1].strip().strip("\"'") or desc
+                                            if len(desc) > 160:
+                                                desc = desc[:157] + "..."
+                            h_skills.append(
+                                f"- `{nm}` — {desc} *(Hermes; path: {md_path})*"
+                            )
+                        except Exception:
+                            pass
+                    if h_skills:
+                        lines.append("\n**(Hermes Global Skills — read-only bridge)**")
+                        lines.extend(h_skills[:40])  # token budget
+            except Exception as e:
+                logger.debug(f"Hermes skill bridge skipped: {e}")
+            # ---------------------------
+
+            by_cat: dict[str, list] = {}
+            for s in skill_idx:
+                by_cat.setdefault(s["category"], []).append(s)
+            for cat in sorted(by_cat):
+                lines.append(f"\n**{cat}**")
+                for s in by_cat[cat]:
+                    badge = " *(draft)*" if s.get("status") == "draft" else ""
+                    lines.append(f"- `{s['name']}` — {s['description']}{badge}")
+            # Only emit block if we have more than the header lines
+            if len(lines) > 2:
                 skill_index_block = "\n\n" + "\n".join(lines)
         except Exception as _e:
             # Skill index is a soft enhancement — never fail prompt assembly on it.
@@ -2526,13 +2594,14 @@ def build_active_plan_note(approved_plan: str) -> str:
     )
 
 
-def _detect_runaway_call(call_freq, threshold=15):
+def _detect_runaway_call(call_freq, threshold=5):
     """Tool name of a call signature repeated >= ``threshold`` times — a real
     runaway loop. Counts IDENTICAL repeated calls (same tool AND args), so a
     legitimate batch of distinct calls to one tool (e.g. creating 18 calendar
     events at once) is NOT flagged. Returns ``None`` when nothing is runaway.
 
     ``call_freq`` is a Counter keyed by ``"{tool_type}:{content[:120]}"``.
+    Hermes discipline: threshold lowered from 15 → 5 so loops die earlier.
     """
     sig = next((s for s, n in call_freq.items() if n >= threshold), None)
     return sig.split(":", 1)[0] if sig else None
@@ -3034,6 +3103,7 @@ async def stream_agent_loop(
         # with the per-endpoint flag above.
         "minimax", "kimi", "yi-", "phi-3", "phi-4", "command-r",
         "glm-4", "internlm", "hermes",
+        "fusion",  # SAO local gateway model
         # deepseek-v2/v3/chat support tools via the cloud API; deepseek-r1
         # (reasoning model) does not — handled by the blocklist below.
         "deepseek-v", "deepseek-chat",
@@ -3059,17 +3129,35 @@ async def stream_agent_loop(
     # the fenced-block path is used instead of native function calling.
     _is_ollama_native = _is_ollama_native_url(endpoint_url or "")
     _ollama_openai_compat = _is_ollama_openai_compat_url(endpoint_url or "")
+    # Hermes discipline / SAO Phase A: prefer native OpenAI-style tools when
+    # settings say so (agent_prefer_native_tools). Endpoint.supports_tools still
+    # wins when explicitly True/False. Fenced blocks remain fallback via
+    # agent_allow_fenced_fallback (used later in _resolve_tool_blocks).
+    _prefer_native = bool(get_setting("agent_prefer_native_tools", True))
+    _allow_fenced_fallback = bool(get_setting("agent_allow_fenced_fallback", True))
     if _endpoint_supports is True:
         _is_api_model = True
     elif (
         _endpoint_supports is False
         or _model_no_tools
         or _is_ollama_native
-        or _ollama_openai_compat
+        or (_ollama_openai_compat and not _prefer_native)
     ):
         _is_api_model = False
+    elif _prefer_native and not _model_no_tools:
+        # SAO: custom OpenAI-compat (e.g. fusion @ host.docker.internal:20128)
+        # should send tool schemas even when host is not in _API_HOSTS.
+        _is_api_model = True
     else:
         _is_api_model = any(h in endpoint_url for h in _API_HOSTS) or _model_supports_tools
+    logger.info(
+        "[agent-native] prefer_native=%s endpoint_supports=%s is_api_model=%s allow_fenced_fallback=%s model=%s",
+        _prefer_native,
+        _endpoint_supports,
+        _is_api_model,
+        _allow_fenced_fallback,
+        model,
+    )
     _compact_agent_prompt = _is_api_model or _is_ollama_native or _ollama_openai_compat
     messages, mcp_schemas = _build_system_prompt(
         messages, model, _prompt_active_document, mcp_mgr, disabled_tools,
@@ -3227,6 +3315,9 @@ async def stream_agent_loop(
     actual_model = model
     total_tool_calls = 0  # for budget enforcement
     _ody_notes_tool_completed = False
+
+    # Hermes session discipline tracking (totals across whole agent run)
+    _session_tool_counts = {"web_fetch": 0, "web_search": 0, "bash": 0, "python": 0}
 
     # Loop-breaker state. Small models (e.g. deepseek-v4-flash) can get
     # stuck firing the same tool call over and over with no text — burns
@@ -3598,7 +3689,9 @@ async def stream_agent_loop(
             native_tool_calls,
             round_num,
             is_api_model=(_is_api_model and not guide_only),
-            allow_fenced_for_api=_ody_doc_finetune_mode,
+            # SAO: prefer native, but still accept fenced blocks if model falls back
+            # (or document LoRA path which is fence-only).
+            allow_fenced_for_api=(_ody_doc_finetune_mode or _allow_fenced_fallback),
         )
         if _ody_doc_stream_create_mode and tool_blocks:
             create_idx = next(
@@ -3915,7 +4008,8 @@ async def stream_agent_loop(
         # Distinct calls to one tool (a real batch) are legitimate work, so we
         # count identical call signatures, not raw per-tool-type totals.
         _runaway = _detect_runaway_call(_call_freq)
-        if _stuck_rounds >= 4 or _runaway:
+        # Hermes discipline: trip after 2 stuck rounds (was 4) or runaway sig
+        if _stuck_rounds >= 2 or _runaway:
             reason = (f"calling {_runaway} with identical arguments over and over" if _runaway
                       else "repeating the same tool calls without new progress")
             logger.warning(f"[agent] loop-breaker tripped on round {round_num} ({reason}); sig={_sig[:80]!r}")
@@ -3993,12 +4087,46 @@ async def stream_agent_loop(
                     yield f'data: {json.dumps({"type": "doc_stream_delta", "content": content})}\n\n'
                     break
 
-        # Execute each tool block
+        # Execute each tool block (Hermes-style discipline + early loop detection)
+        from src.constants import MAX_TOOLS_PER_ROUND, MAX_WEB_FETCH_PER_SESSION, MAX_WEB_SEARCH_PER_SESSION, MAX_BASH_PER_SESSION
         tool_results = []
         tool_result_texts = []  # plain text for native tool role messages
         budget_hit = False
+        _round_tool_calls = 0
+        _seen_signatures = set()
+        
+        # Hermes session counters live on stream_agent_loop scope (_session_tool_counts)
         for i, block in enumerate(tool_blocks):
-            # --- Tool budget check ---
+            # --- Round-level tool cap ---
+            if _round_tool_calls >= MAX_TOOLS_PER_ROUND:
+                logger.warning(
+                    f"[agent] round {round_num}: capped at {MAX_TOOLS_PER_ROUND} tool calls, "
+                    f"dropping {len(tool_blocks) - i} remaining blocks"
+                )
+                break
+            # --- Session-level tool type caps (Hermes discipline) ---
+            t_type = block.tool_type
+            if t_type == "web_fetch" and _session_tool_counts.get("web_fetch", 0) >= MAX_WEB_FETCH_PER_SESSION:
+                logger.warning(f"[agent] round {round_num}: max web_fetch ({MAX_WEB_FETCH_PER_SESSION}) reached, skipping")
+                continue
+            if t_type == "web_search" and _session_tool_counts.get("web_search", 0) >= MAX_WEB_SEARCH_PER_SESSION:
+                logger.warning(f"[agent] round {round_num}: max web_search ({MAX_WEB_SEARCH_PER_SESSION}) reached, skipping")
+                continue
+            if t_type in ("bash", "python") and _session_tool_counts.get(t_type, 0) >= MAX_BASH_PER_SESSION:
+                logger.warning(f"[agent] round {round_num}: max {t_type} ({MAX_BASH_PER_SESSION}) reached, skipping")
+                continue
+
+            # --- Early duplicate detection (Hermes discipline) ---
+            sig = f"{block.tool_type}:{(block.content or '').strip()[:120]}"
+            if sig in _seen_signatures:
+                logger.warning(
+                    f"[agent] round {round_num}: duplicate tool call ({sig[:60]}), early break"
+                )
+                break
+            _seen_signatures.add(sig)
+            _round_tool_calls += 1
+            _session_tool_counts[t_type] = _session_tool_counts.get(t_type, 0) + 1
+            # --- Global tool budget check ---
             if max_tool_calls > 0 and total_tool_calls >= max_tool_calls:
                 yield f'data: {json.dumps({"type": "budget_exceeded", "limit": max_tool_calls, "used": total_tool_calls})}\n\n'
                 budget_hit = True

@@ -1651,19 +1651,18 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
           return;
         }
 
-        // If thinking is still streaming (unclosed <think>), show indicator instead of raw text
+        // If thinking is still streaming (unclosed <think>), show header-only indicator (Option B)
         if (markdownModule.hasUnclosedThinkTag && markdownModule.hasUnclosedThinkTag(dt)) {
           const thinkStart = dt.search(/<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>|<\|channel>thought/i);
           const thinkContent = dt.substring(Math.max(thinkStart, 0))
             .replace(/<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>|<\|channel>thought\s*\n?/i, '')
             .replace(/<channel\|>/gi, '')
             .trim();
-          const lines = thinkContent.split('\n').length;
-          // Don't show beforeThink text during streaming — it'll appear in the final render
-          // This prevents the "split into two" duplication
+          const tok = _estimateThinkingTokens(thinkContent);
+          // Don't render thinking body during streaming — header + token estimate only
           contentEl.innerHTML =
             '<div class="thinking-section"><div class="thinking-header"><div class="thinking-header-left">Thinking' +
-            (lines > 1 ? ` (${lines} lines)` : '') + '</div></div></div>';
+            (tok > 0 ? ` (${tok} tok)` : '') + '</div></div></div>';
           // The stream renderer self-heals when it next sees this overwritten
           // container (streamingRenderer.js), so no explicit reset is needed here.
           uiModule.scrollHistory();
@@ -1958,7 +1957,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   thinkingStartTime = Date.now();
                   if (spinner && spinner.element) spinner.destroy();
 
-                  // Create a live thinking box — starts expanded so content streams visibly
+                  // Create a live thinking box — header-only while streaming (Option B anti-freeze)
                   var thinkBody = roundHolder.querySelector('.body');
                   var thinkContent = _ensureStreamLayout(thinkBody);
                   thinkContent.style.minHeight = '';
@@ -1969,9 +1968,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                         <div class="thinking-header-left"><span class="live-think-header-text">Thinking\u2026</span></div>
                         <span class="live-think-spinner-slot" style="flex-shrink:0;margin-left:auto;"></span>
                         <span class="live-think-timer" style="font-size:11px;opacity:0.4;font-variant-numeric:tabular-nums;margin-left:6px;margin-right:5px;"></span>
-                        <span class="thinking-toggle live-think-toggle expanded" id="${_liveThinkDomId}-toggle"></span>
+                        <span class="thinking-toggle live-think-toggle" id="${_liveThinkDomId}-toggle"></span>
                       </div>
-                      <div class="thinking-content expanded" id="${_liveThinkDomId}">
+                      <div class="thinking-content" id="${_liveThinkDomId}">
                         <div class="thinking-content-inner live-think-inner"></div>
                       </div>
                     </div>`;
@@ -2003,7 +2002,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   }
                 } else if (hasUnclosedThink && isThinking) {
                   if (_liveThinkInner) {
-                    // Extract raw thinking text (strip known thinking wrappers and prefixes)
+                    // Count tokens for header timer only — don't render content (avoids DOM freeze)
                     var thinkText = markdownModule.normalizeThinkingMarkup(_streamDisplayText(roundText))
                       .replace(/<\/?(?:think(?:ing)?|thought)(?:\s+[^>]*)?>/gi, '')
                       .replace(/<\|channel>thought\s*\n?/gi, '')
@@ -2011,29 +2010,20 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                       .replace(/<channel\|>/gi, '');
                     thinkText = thinkText.replace(/^\s*Thinking(?:\s+Process)?:\s*/i, '');
                     _liveThinkTokenCount = _estimateThinkingTokens(thinkText);
-                    _liveThinkInner.innerHTML = markdownModule.mdToHtml(thinkText);
                     if (_liveThinkTimerEl) {
                       var _elapsedLive = thinkingStartTime ? ((Date.now() - thinkingStartTime) / 1000).toFixed(1) : '';
                       _liveThinkTimerEl.textContent = _formatThinkStats(_elapsedLive, _liveThinkTokenCount);
                     }
-                    // Keep thinking box scrolled to bottom, but let user scroll up
-                    var _followThinking = true;
-                    var thinkBox = _liveThinkInner.closest('.thinking-content');
-                    if (thinkBox) {
-                      var nearBottom = thinkBox.scrollHeight - thinkBox.clientHeight - thinkBox.scrollTop < 80;
-                      if (nearBottom) thinkBox.scrollTop = thinkBox.scrollHeight;
-                      _followThinking = nearBottom;
-                    }
                   }
-                  if (_followThinking) uiModule.scrollHistory();
                   continue;
                 } else if (!hasUnclosedThink && isThinking) {
                   isThinking = false;
-                  var _thinkTextLen = _liveThinkInner ? _liveThinkInner.textContent.trim().length : 0;
+                  // Token count was tracked during stream; DOM content is intentionally empty until final render
+                  var _thinkTextLen = _liveThinkTokenCount || 0;
 
-                  // If thinking was trivially short (< 20 chars), remove the section entirely
+                  // If thinking was trivially short (< ~20 chars ≈ 5 tokens), remove the section entirely
                   // Models sometimes emit <think>The</think> or similar noise
-                  if (_thinkTextLen < 20 && _liveThinkSection) {
+                  if (_thinkTextLen < 5 && _liveThinkSection) {
                     _liveThinkSection.remove();
                     _liveThinkSection = null;
                     _liveThinkContent = null;
@@ -2051,7 +2041,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                     continue;
                   }
 
-                  // Thinking ended — smooth transition: update header, pause, then collapse
+                  // Thinking ended — fill content once (collapsed), then show reply
                   // Stop live timer and spinner
                   cancelAnimationFrame(_thinkTimerRAF);
                   var elapsed = thinkingStartTime ? ((Date.now() - thinkingStartTime) / 1000).toFixed(1) : null;
@@ -2060,8 +2050,29 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                     accumulated = accumulated.replace(/<think>/i, '<think time="' + elapsed + '">');
                     roundText = roundText.replace(/<think>/i, '<think time="' + elapsed + '">');
                   }
+
+                  // One-shot render of thinking body (collapsed) so user can expand later
+                  if (_liveThinkInner) {
+                    var _finalThink = markdownModule.normalizeThinkingMarkup(_streamDisplayText(roundText))
+                      .replace(/<\/?(?:think(?:ing)?|thought)(?:\s+[^>]*)?>/gi, '')
+                      .replace(/<\|channel>thought\s*\n?/gi, '')
+                      .replace(/<\|channel>response\s*\n?/gi, '')
+                      .replace(/<channel\|>/gi, '');
+                    _finalThink = _finalThink.replace(/^\s*Thinking(?:\s+Process)?:\s*/i, '');
+                    // Cap rendered thinking body to avoid huge DOM (keep full text in message history)
+                    var _THINK_DOM_CAP = 8000;
+                    if (_finalThink.length > _THINK_DOM_CAP) {
+                      _finalThink = _finalThink.slice(0, _THINK_DOM_CAP) + '\n\n… (thinking truncated in UI for performance)';
+                    }
+                    _liveThinkInner.innerHTML = markdownModule.mdToHtml(_finalThink);
+                    _liveThinkTokenCount = _estimateThinkingTokens(_finalThink);
+                  }
+
                   if (_liveThinkHeader) _liveThinkHeader.textContent = 'View thinking process';
                   if (_liveThinkSpinnerSlot) _liveThinkSpinnerSlot.remove();
+                  // Keep content collapsed (Option B)
+                  if (_liveThinkContent) _liveThinkContent.classList.remove('expanded');
+                  if (_liveThinkToggle) _liveThinkToggle.classList.remove('expanded');
                   // Move timer to right side of header
                   if (_liveThinkTimerEl && elapsed) {
                     _liveThinkTimerEl.textContent = _formatThinkStats(elapsed, _liveThinkTokenCount);

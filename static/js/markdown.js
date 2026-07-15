@@ -335,6 +335,12 @@ export function extractThinkingBlocks(text) {
 function createThinkingSection(thinkingContent, index = 0, thinkingTime = null) {
   const id = `thinking-${Date.now()}-${index}`;
   const timeHtml = thinkingTime ? `<span style="font-size:11px;opacity:0.4;font-variant-numeric:tabular-nums;">${thinkingTime}s</span>` : '';
+  // Cap UI render size to avoid browser freeze on huge reasoning dumps (Option B)
+  const THINK_DOM_CAP = 8000;
+  let body = thinkingContent || '';
+  if (body.length > THINK_DOM_CAP) {
+    body = body.slice(0, THINK_DOM_CAP) + '\n\n… (thinking truncated in UI for performance)';
+  }
   return `
     <div class="thinking-section">
       <div class="thinking-header" data-thinking-id="${id}">
@@ -348,7 +354,7 @@ function createThinkingSection(thinkingContent, index = 0, thinkingTime = null) 
       </div>
       <div class="thinking-content" id="${id}">
         <div class="thinking-content-inner">
-          ${mdToHtml(thinkingContent)}
+          ${mdToHtml(body)}
         </div>
       </div>
     </div>
