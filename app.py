@@ -707,6 +707,10 @@ app.include_router(setup_diagnostics_routes(rag_manager, rag_available, research
 from routes.bridge_routes import router as bridge_router
 app.include_router(bridge_router)
 
+# Odys Projects (native Windows scan)
+from routes.odys_projects_routes import router as odys_projects_router
+app.include_router(odys_projects_router)
+
 # Cleanup
 from routes.cleanup_routes import setup_cleanup_routes
 app.include_router(setup_cleanup_routes(session_manager))

@@ -1094,6 +1094,27 @@ function initializeEventListeners() {
       }
     });
   }
+
+  // Odys Projects tool button
+  const toolOdysBtn = el('tool-odys-btn');
+  const odysModal = el('odys-modal');
+  if (toolOdysBtn && odysModal) {
+    toolOdysBtn.addEventListener('click', async () => {
+      odysModal.classList.remove('hidden');
+      try {
+        const mod = await import('./js/odysProjects.js');
+        await mod.initOdysProjects({ showToast: typeof showToast === 'function' ? showToast : undefined });
+      } catch (e) {
+        console.error('Odys Projects load failed', e);
+      }
+    });
+  }
+  const closeOdysBtn = el('close-odys-modal');
+  if (closeOdysBtn && odysModal) {
+    closeOdysBtn.addEventListener('click', () => {
+      odysModal.classList.add('hidden');
+    });
+  }
   // Refresh notes due-reminder badge on load and every 5 minutes
   if (notesModule && notesModule.refreshDueBadge) {
     notesModule.refreshDueBadge();
