@@ -62,7 +62,7 @@ def _to_float(x, default: float = 0.0) -> float:
 class SkillsManager:
     """Read/write SKILL.md files under <data_dir>/skills/.
 
-    Also loads packaged built-in skills (Hermes-parity) from
+    Also loads packaged core skills from
     ``ODYSSEUS_BUILTIN_SKILLS_DIR`` / ``builtin_skills/`` (read-only).
     User skills in data/skills always win on name collision.
     """

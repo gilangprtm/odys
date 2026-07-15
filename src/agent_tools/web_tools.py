@@ -109,7 +109,7 @@ class WebFetchTool:
         if not low.startswith(("http://", "https://")):
             url = "https://" + url
 
-        # Hermes discipline: GitHub repo tree endpoints explode into recursive
+        # Policy: GitHub repo tree endpoints explode into recursive
         # web_fetch storms (log evidence: 3724 tool blocks / ~600s). Cap listing
         # and instruct the model to fetch only key files.
         _gh_contents = "api.github.com/repos/" in low and "/contents" in low
@@ -163,7 +163,7 @@ class WebFetchTool:
                         lines.append(f"- [{typ}] {path}{size_s}")
                     more = len(items) - max_entries
                     policy = (
-                        "POLICY (Hermes discipline):\n"
+                        "POLICY:\n"
                         "- Do NOT recursively fetch every folder under /contents.\n"
                         "- Prefer: README*, package.json, pyproject.toml, Cargo.toml, "
                         "go.mod, AGENTS.md, src/main.*, app entrypoints (max 5 files).\n"

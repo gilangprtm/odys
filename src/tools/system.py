@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
     """Handle manage_skills tool calls.
 
-    SKILL.md-backed CRUD with progressive disclosure (Hermes-style). Actions:
+    SKILL.md-backed CRUD with progressive disclosure. Actions:
 
       list / index               — Level 0: name + description summary.
       view {name}                — Level 1: full SKILL.md.

@@ -133,7 +133,7 @@ _AGENT_RULES = """\
 - "Create/add/write a note" / "notes" / "todos" / "remind me to X at <time>" → use `manage_notes`. Do NOT store notes in `manage_memory`; memory is for persistent facts/preferences about the user, not note content. For reminders, include a `due_date`; for todos, use `note_type=checklist` when appropriate.
 - "Do X every morning / daily / on a schedule / automatically" (e.g. "summarize my inbox every morning") → this is a request to CREATE A SCHEDULED TASK, not to do X once right now. Call `manage_tasks` with action=create (prompt = what to do, schedule + cron/time). Do NOT just perform the action inline this turn — the user wants it to recur. After creating, return a clickable `[Task name](#task-<id>)` link and tell them it'll run on schedule and show in the Tasks panel. If you also want to show a sample of this run, do that AFTER creating the task, not instead of it.
 
-## Hermes discipline (mandatory — applies to ALL tools, not just GitHub)
+## Agent discipline (mandatory — applies to ALL tools, not just GitHub)
 - **Budget tools.** Prefer ≤8 tool calls for simple questions, ≤15 for multi-step work. Never flood the context with dozens of parallel fetches/reads.
 - **One best next step.** After tool results, either answer or take the single highest-value next call — not a batch of speculative calls.
 - **No identical retries.** Never re-call the same tool with the same arguments. If it failed, change args, use another tool, or declare blocked.
@@ -2552,7 +2552,7 @@ def _detect_runaway_call(call_freq, threshold=5):
     events at once) is NOT flagged. Returns ``None`` when nothing is runaway.
 
     ``call_freq`` is a Counter keyed by ``"{tool_type}:{content[:120]}"``.
-    Hermes discipline: threshold lowered from 15 → 5 so loops die earlier.
+    Agent discipline: threshold lowered from 15 → 5 so loops die earlier.
     """
     sig = next((s for s, n in call_freq.items() if n >= threshold), None)
     return sig.split(":", 1)[0] if sig else None
@@ -3080,7 +3080,7 @@ async def stream_agent_loop(
     # the fenced-block path is used instead of native function calling.
     _is_ollama_native = _is_ollama_native_url(endpoint_url or "")
     _ollama_openai_compat = _is_ollama_openai_compat_url(endpoint_url or "")
-    # Hermes discipline / SAO Phase A: prefer native OpenAI-style tools when
+    # Prefer native OpenAI-style tools when
     # settings say so (agent_prefer_native_tools). Endpoint.supports_tools still
     # wins when explicitly True/False. Fenced blocks remain fallback via
     # agent_allow_fenced_fallback (used later in _resolve_tool_blocks).
@@ -3267,7 +3267,7 @@ async def stream_agent_loop(
     total_tool_calls = 0  # for budget enforcement
     _ody_notes_tool_completed = False
 
-    # Hermes session discipline tracking (totals across whole agent run)
+    # Session discipline tracking (totals across whole agent run)
     _session_tool_counts = {"web_fetch": 0, "web_search": 0, "bash": 0, "python": 0}
 
     # Loop-breaker state. Small models (e.g. deepseek-v4-flash) can get
@@ -3959,7 +3959,7 @@ async def stream_agent_loop(
         # Distinct calls to one tool (a real batch) are legitimate work, so we
         # count identical call signatures, not raw per-tool-type totals.
         _runaway = _detect_runaway_call(_call_freq)
-        # Hermes discipline: trip after 2 stuck rounds (was 4) or runaway sig
+        # Discipline: trip after 2 stuck rounds (was 4) or runaway sig
         if _stuck_rounds >= 2 or _runaway:
             reason = (f"calling {_runaway} with identical arguments over and over" if _runaway
                       else "repeating the same tool calls without new progress")
@@ -4038,7 +4038,7 @@ async def stream_agent_loop(
                     yield f'data: {json.dumps({"type": "doc_stream_delta", "content": content})}\n\n'
                     break
 
-        # Execute each tool block (Hermes-style discipline + early loop detection)
+        # Execute each tool block (discipline + early loop detection)
         from src.constants import MAX_TOOLS_PER_ROUND, MAX_WEB_FETCH_PER_SESSION, MAX_WEB_SEARCH_PER_SESSION, MAX_BASH_PER_SESSION
         tool_results = []
         tool_result_texts = []  # plain text for native tool role messages
@@ -4046,7 +4046,7 @@ async def stream_agent_loop(
         _round_tool_calls = 0
         _seen_signatures = set()
         
-        # Hermes session counters live on stream_agent_loop scope (_session_tool_counts)
+        # Session counters live on stream_agent_loop scope (_session_tool_counts)
         for i, block in enumerate(tool_blocks):
             # --- Round-level tool cap ---
             if _round_tool_calls >= MAX_TOOLS_PER_ROUND:
@@ -4055,7 +4055,7 @@ async def stream_agent_loop(
                     f"dropping {len(tool_blocks) - i} remaining blocks"
                 )
                 break
-            # --- Session-level tool type caps (Hermes discipline) ---
+            # --- Session-level tool type caps ---
             t_type = block.tool_type
             if t_type == "web_fetch" and _session_tool_counts.get("web_fetch", 0) >= MAX_WEB_FETCH_PER_SESSION:
                 logger.warning(f"[agent] round {round_num}: max web_fetch ({MAX_WEB_FETCH_PER_SESSION}) reached, skipping")
@@ -4067,7 +4067,7 @@ async def stream_agent_loop(
                 logger.warning(f"[agent] round {round_num}: max {t_type} ({MAX_BASH_PER_SESSION}) reached, skipping")
                 continue
 
-            # --- Early duplicate detection (Hermes discipline) ---
+            # --- Early duplicate detection ---
             sig = f"{block.tool_type}:{(block.content or '').strip()[:120]}"
             if sig in _seen_signatures:
                 logger.warning(
@@ -4526,13 +4526,13 @@ async def stream_agent_loop(
             f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
         )
 
-        # Hermes discipline (Phase B): Intra-round context compression.
+        # Intra-round context compression.
         # Prevent context ballooning across 10+ tool rounds by compressing
         # older tool outputs + history once we hit ~85% of soft budget.
         try:
             from src.context_compression import compress_messages
             _comp_budget = soft_budget if soft_budget > 0 else 6000
-            # Only trigger compression above threshold — Hermes-style dynamic handling
+            # Only trigger compression above threshold
             if estimate_tokens(messages) > int(_comp_budget * 0.85):
                 _comp_target = int(_comp_budget * 0.50)
                 before_b = estimate_tokens(messages)

@@ -1,8 +1,7 @@
 """SKILL.md parser & writer.
 
 Reads/writes a single skill from a `SKILL.md` file with YAML frontmatter
-and a structured markdown body. Inspired by Hermes' skills format
-(https://hermes-agent.nousresearch.com/docs/user-guide/features/skills).
+and a structured markdown body (YAML frontmatter + structured sections).
 
 Frontmatter shape (YAML):
 

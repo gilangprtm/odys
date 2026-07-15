@@ -10,7 +10,7 @@ APP_VERSION = "1.0.1"
 BASE_DIR = os.path.join(get_app_root(), "")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 DATA_DIR = os.getenv("ODYSSEUS_DATA_DIR", get_default_data_dir())
-# Packaged Hermes-parity skills shipped with Odysseus (read-only SoT).
+# Packaged core skills shipped with Odysseus (read-only SoT).
 # User-learned / custom skills still live under DATA_DIR/skills/.
 BUILTIN_SKILLS_DIR = os.getenv(
     "ODYSSEUS_BUILTIN_SKILLS_DIR",
@@ -76,7 +76,7 @@ MAX_OUTPUT_CHARS = 10_000       # cap for bash/python/web_search/web_fetch outpu
 MAX_READ_CHARS = 20_000         # cap for read_file / document preview
 MAX_DIFF_LINES = 400            # cap for edit_file unified-diff display
 
-# Hermes-style session discipline (enforced in agent_loop tool execution)
+# Session discipline caps (enforced in agent_loop tool execution)
 MAX_TOOLS_PER_ROUND = 12        # hard cap tool blocks executed per agent round
 MAX_WEB_FETCH_PER_SESSION = 12  # cap web_fetch calls per stream_agent_loop run
 MAX_WEB_SEARCH_PER_SESSION = 6  # cap web_search calls per run

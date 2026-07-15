@@ -1,5 +1,5 @@
 """
-Context compression for Odysseus agent loop (Hermes discipline port).
+Context compression for Odysseus agent loop.
 
 Compresses long histories when input tokens exceed soft budget.
 Keeps:

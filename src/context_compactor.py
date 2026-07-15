@@ -282,7 +282,7 @@ def trim_for_context(messages: List[Dict], context_length: int, reserve_tokens: 
     # user turn. If a pasted message alone exceeds the model context, truncate
     # that message with a visible notice instead of dropping it; otherwise the
     # model appears to "ignore" large pastes because it never receives them.
-    # Hermes-style: recent context matters more than old context.
+    # Recent context matters more than old context.
     PROTECT_RECENT = 10
     current_msg = convo_msgs[-1:] if convo_msgs else []
     prior_convo = convo_msgs[:-1] if convo_msgs else []
