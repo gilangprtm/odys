@@ -52,18 +52,21 @@ Buka `http://localhost:7000`. Selesai.
 | `odys stop` | Matikan semua proses |
 | `odys status` | Cek status (bridge & server) |
 | `odys bridge` | Jalankan Desktop Bridge aja (tanpa server) |
+| `odys say "teks"` | Bicara lewat speaker Windows (SAPI) |
+| `odys listen` | Rekam mic → STT (butuh server jalan) |
 | `odys help` | Bantuan |
 
 ### Desktop Bridge
 
-Bridge adalah service Windows yg meluncurkan **whitelisted** aplikasi desktop dari chat/perintah:
+Bridge = service Windows: buka app desktop + TTS lewat speaker host.
 
 ```
 odys start → bridge nyala otomatis di background
 odys stop  → bridge mati
+odys say "selamat pagi tuan"  → suara dari speaker
 ```
 
-Aplikasi yg terdaftar: ZCode, Antigravity IDE, Zed, Obsidian, Chrome, Edge, Terminal, Explorer.
+Aplikasi terdaftar: ZCode, Antigravity IDE, Zed, Obsidian, Chrome, Edge, Terminal, Explorer.
 
 ---
 
@@ -76,7 +79,7 @@ Aplikasi yg terdaftar: ZCode, Antigravity IDE, Zed, Obsidian, Chrome, Edge, Term
 - **Documents** — AI-powered editor (Markdown, HTML, CSV)
 - **Email** — IMAP/SMTP inbox, summaries, reminders, reply drafts
 - **Notes, Tasks + Calendar** — reminders, todos, CalDAV sync
-- **Voice** — STT/TTS ready (aktifkan di Settings)
+- **Voice** — STT/TTS di chat + `odys say` lewat speaker Windows
 - **Themes** — Blueprint UI, multiple neon themes
 
 ---

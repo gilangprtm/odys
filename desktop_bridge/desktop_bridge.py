@@ -74,6 +74,10 @@ class CommandRequest(BaseModel):
     args: Dict[str, Any] = Field(default_factory=dict)
 
 
+class TTSRequest(BaseModel):
+    text: str = Field(..., min_length=1, max_length=4000)
+
+
 # ── internal helpers ─────────────────────────────────────
 
 def _log_event(entry: Dict[str, Any]) -> None:
@@ -304,6 +308,74 @@ def _launch_cursor_with_path(folder: Optional[str] = None) -> Dict[str, Any]:
     return out
 
 
+# ── TTS helpers ──────────────────────────────────────────
+
+def _speak_sapi_pywin32(text: str) -> Dict[str, Any]:
+    """Speak via Windows SAPI through pywin32 (preferred)."""
+    try:
+        import win32com.client  # type: ignore
+    except ImportError:
+        return {"ok": False, "message": "pywin32 not installed"}
+    try:
+        speaker = win32com.client.Dispatch("SAPI.SpVoice")
+        speaker.Speak(text)
+        return {"ok": True, "message": "Spoken via SAPI (pywin32)", "engine": "pywin32"}
+    except Exception as exc:
+        logger.error("SAPI pywin32 speak failed: %s", exc)
+        return {"ok": False, "message": str(exc)}
+
+
+def _speak_sapi_powershell(text: str) -> Dict[str, Any]:
+    """Speak via System.Speech through PowerShell (fallback)."""
+    # Escape single quotes for PowerShell single-quoted string
+    safe = text.replace("'", "''")
+    ps = (
+        "Add-Type -AssemblyName System.Speech; "
+        "$s=New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+        f"$s.Speak('{safe}')"
+    )
+    try:
+        completed = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if completed.returncode != 0:
+            err = (completed.stderr or completed.stdout or "PowerShell TTS failed").strip()
+            logger.error("PowerShell TTS failed: %s", err)
+            return {"ok": False, "message": err, "engine": "powershell"}
+        return {"ok": True, "message": "Spoken via SAPI (PowerShell)", "engine": "powershell"}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "message": "TTS timed out", "engine": "powershell"}
+    except OSError as exc:
+        logger.error("PowerShell TTS launch failed: %s", exc)
+        return {"ok": False, "message": str(exc), "engine": "powershell"}
+
+
+def _speak_text(text: str) -> Dict[str, Any]:
+    """Speak text: pywin32 SAPI first, PowerShell System.Speech fallback."""
+    text = (text or "").strip()
+    if not text:
+        return {"ok": False, "message": "Empty text"}
+    out = _speak_sapi_pywin32(text)
+    if out.get("ok"):
+        return out
+    logger.info("pywin32 TTS unavailable (%s); falling back to PowerShell", out.get("message"))
+    return _speak_sapi_powershell(text)
+
+
+def _check_bridge_token(
+    x_odys_bridge_token: Optional[str] = None,
+    x_atlas_bridge_token: Optional[str] = None,
+) -> None:
+    token = (x_odys_bridge_token or x_atlas_bridge_token or "").strip()
+    if not DEFAULT_TOKEN:
+        raise HTTPException(status_code=503, detail="Bridge token not configured on host.")
+    if token != DEFAULT_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid bridge token.")
+
+
 # ── FastAPI routes ───────────────────────────────────────
 
 @app.on_event("startup")
@@ -351,11 +423,7 @@ def run_command(
     x_atlas_bridge_token: Optional[str] = Header(None, alias="X-Atlas-Bridge-Token"),
 ):
     # Accept both header names for backward compat
-    token = (x_odys_bridge_token or x_atlas_bridge_token or "").strip()
-    if not DEFAULT_TOKEN:
-        raise HTTPException(status_code=503, detail="Bridge token not configured on host.")
-    if token != DEFAULT_TOKEN:
-        raise HTTPException(status_code=401, detail="Invalid bridge token.")
+    _check_bridge_token(x_odys_bridge_token, x_atlas_bridge_token)
 
     cmd = body.command.strip()
     args = body.args or {}
@@ -397,6 +465,22 @@ def run_command(
         return _launch_url(url, browser)
 
     return {"ok": False, "message": f"Unknown command: {cmd}"}
+
+
+@app.post("/tts")
+def tts(
+    body: TTSRequest,
+    x_odys_bridge_token: Optional[str] = Header(None, alias="X-Odys-Bridge-Token"),
+    x_atlas_bridge_token: Optional[str] = Header(None, alias="X-Atlas-Bridge-Token"),
+):
+    """Speak text via Windows SAPI (pywin32) or PowerShell System.Speech fallback."""
+    _check_bridge_token(x_odys_bridge_token, x_atlas_bridge_token)
+    text = body.text.strip()
+    _log_event({"tts": text[:120]})
+    out = _speak_text(text)
+    if not out.get("ok"):
+        raise HTTPException(status_code=500, detail=out.get("message") or "TTS failed")
+    return out
 
 
 # ── entrypoint ───────────────────────────────────────────

@@ -138,7 +138,7 @@ app.add_middleware(
         "Content-Type",
         "X-API-Key",
         "X-Auth-Token",
-        "X-Odysseus-Internal-Token",
+        "X-Odys-Internal-Token",
         "X-Odysseus-Owner",
         "X-Requested-With",
         "X-TZ-Offset",
