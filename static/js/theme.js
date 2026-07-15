@@ -29,6 +29,28 @@ export const THEMES = {
                             inputBg: '#2f2f2f', brandColor: '#ffffff', brandMixTo: '#ffffff' } },
   claude:     { bg:'#262624', fg:'#f5f4f0', panel:'#30302e', border:'#4a4a47', red:'#c6613f' },
   cute:       { bg:'#fff0f5', fg:'#d4608a', panel:'#fff8fa', border:'#f0c0d0', red:'#ff6b9d' },
+  // Command-center: deep teal canvas, warm cream text, gold primary actions.
+  // Dense ops aesthetic — monospace-friendly, high contrast on dark.
+  command:    { bg:'#0b201f', fg:'#dccbb5', panel:'#0f2625', border:'#2d4038', red:'#ffac02',
+                advanced: {
+                  sendBtnBg: '#ffac02', sendBtnHover: '#e09a00',
+                  userBubbleBg: '#132e2c', aiBubbleBg: '#0f2625',
+                  bubbleBorder: '#2d4038',
+                  sidebarBg: '#0a1c1b',
+                  inputBg: '#0f2625', inputBorder: '#2d4038',
+                  brandColor: '#ffac02', brandMixTo: '#7c945c',
+                  hamburgerColor: '#dccbb5',
+                  toggleActive: '#7c945c',
+                } },
+  commandlight: { bg:'#e4ebdf', fg:'#0b201f', panel:'#f2f6ee', border:'#c5d0c0', red:'#2e6fb0',
+                advanced: {
+                  sendBtnBg: '#2e6fb0', sendBtnHover: '#245a8f',
+                  userBubbleBg: '#dce6d6', aiBubbleBg: '#f2f6ee',
+                  bubbleBorder: '#c5d0c0',
+                  sidebarBg: '#dce4d6',
+                  inputBg: '#f2f6ee', inputBorder: '#c5d0c0',
+                  brandColor: '#2e6fb0', brandMixTo: '#7c945c',
+                } },
 };
 
 const DEFAULT_THEME = 'dark';
@@ -59,6 +81,8 @@ const THEME_DEFAULT_PATTERN = {
   organs:     'rain',
   ume:        'petals',
   cute:       'sparkles',
+  command:    'none',
+  commandlight: 'dots',
 };
 
 // Default effect colors for specific themes (overrides --fg)
@@ -74,6 +98,7 @@ const THEME_DEFAULT_INTENSITY = {
   midnight:   0.5,
   terminal:   0.8,
   organs:     0.65,
+  command:    0.35,
 };
 
 // Default frosted-glass state per theme. Themes not listed default to false.

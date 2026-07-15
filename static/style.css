@@ -16,18 +16,18 @@
  */
 
 :root {
-  /* Core palette */
-  --bg: #282c34;
-  --fg: #9cdef2;
-  --panel: #111;
-  --border: #355a66;
-  --red: #e06c75;
+  /* Core palette — command-center defaults (deep teal / cream / gold) */
+  --bg: #0b201f;
+  --fg: #dccbb5;
+  --panel: #0f2625;
+  --border: #2d4038;
+  --red: #ffac02;
   /* Were `var(--green)` / `var(--warn)` — self-referential, so they
      resolved to invalid and every site fell back to its own literal
      (or, for sites with no fallback, painted as transparent/inherit).
      Anchor them to real hex so the token layer actually works. */
-  --green: #50fa7b;
-  --warn: #f0ad4e;
+  --green: #7c945c;
+  --warn: #c4a44c;
 
   /* Syntax highlighting */
   --hl-bg: #1e2228;
