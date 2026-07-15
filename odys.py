@@ -10,6 +10,7 @@ Pemakaian:
     odys bridge      Jalankan bridge aja (tanpa server utama)
     odys say <teks>  TTS via Desktop Bridge (Windows SAPI)
     odys listen      Rekam mic → STT server (/api/stt/transcribe)
+    odys tray        System tray icon Δ (background agent)
 """
 
 import argparse
@@ -585,6 +586,38 @@ def cmd_help(args):
     print(__doc__)
 
 
+# ── Tray (systray) ──────────────────────────────────────
+
+def cmd_tray(args):
+    """System tray icon Δ (background agent)."""
+    tray_script = ROOT / "desktop_tray" / "tray_agent.py"
+    if not tray_script.is_file():
+        print("❌ desktop_tray/tray_agent.py tidak ditemukan.")
+        return 1
+    # Check deps
+    try:
+        import pystray  # noqa: F401
+        from PIL import Image  # noqa: F401
+    except ImportError as exc:
+        print(f"❌ Butuh pystray + Pillow: pip install pystray Pillow  ({exc})")
+        return 1
+
+    print("🔄 Menjalankan system tray agent...")
+    print("   Ikon Δ akan muncul di taskbar (dekat jam).")
+    print("   Klik kanan untuk menu. Tutup dari menu Exit.")
+    print()
+
+    # Launch in background (detached)
+    subprocess.Popen(
+        [sys.executable, str(tray_script)],
+        cwd=ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,
+    )
+    return 0
+
+
 # ── Doctor ───────────────────────────────────────────────
 
 def cmd_doctor(args):
@@ -863,7 +896,7 @@ def main():
         usage="odys <command> [args]"
     )
     parser.add_argument("command", nargs="?", default="help", choices=[
-        "install", "doctor", "start", "stop", "status", "bridge", "say", "listen", "help"
+        "install", "doctor", "start", "stop", "status", "bridge", "say", "listen", "tray", "help"
     ])
     parser.add_argument("subargs", nargs=argparse.REMAINDER)
 
@@ -872,6 +905,7 @@ def main():
     handlers = {
         "install": cmd_install,
         "doctor": cmd_doctor,
+        "tray": cmd_tray,
         "start": cmd_start,
         "stop": cmd_stop,
         "status": cmd_status,

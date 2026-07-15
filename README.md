@@ -11,7 +11,8 @@
   <code>odys doctor</code> ·
   <code>odys start</code> ·
   <code>odys stop</code> ·
-  <code>odys status</code>
+  <code>odys status</code> ·
+  <code>odys tray</code>
 </p>
 
 ---
@@ -56,6 +57,7 @@ Buka `http://localhost:7000`. Selesai.
 | `odys bridge` | Jalankan Desktop Bridge aja (tanpa server) |
 | `odys say "teks"` | Bicara lewat speaker Windows (SAPI) |
 | `odys listen` | Rekam mic → STT (butuh server jalan) |
+| `odys tray` | System tray icon Δ (background agent) |
 | `odys help` | Bantuan |
 
 ### Desktop Bridge
