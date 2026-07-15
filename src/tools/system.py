@@ -232,10 +232,75 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
             lines.append(f"**{sk['name']}**: {sk.get('description','')}\n  When: {sk.get('when_to_use','')}\n  Steps: {steps_str}")
         return {"results": "\n\n".join(lines)}
 
+    # SAO Phase C — one-shot Hermes → Odysseus skill migration (no live sync).
+    if action in ("list_hermes", "discover_hermes"):
+        from services.memory.hermes_skill_import import list_hermes_skill_index, default_hermes_skills_dir
+        hermes_dir = (args.get("hermes_dir") or "").strip() or None
+        rows = list_hermes_skill_index(hermes_dir)
+        root = hermes_dir or default_hermes_skills_dir()
+        if not rows:
+            return {"results": f"No Hermes SKILL.md under {root}"}
+        by_cat: Dict[str, list] = {}
+        for r in rows:
+            by_cat.setdefault(r.get("category") or "imported", []).append(r)
+        lines = [f"Hermes skills dir: `{root}` ({len(rows)} skills)", ""]
+        for cat in sorted(by_cat):
+            lines.append(f"## {cat} ({len(by_cat[cat])})")
+            for r in by_cat[cat][:40]:
+                desc = (r.get("description") or "")[:100]
+                lines.append(f"- **{r['name']}**: {desc}")
+            if len(by_cat[cat]) > 40:
+                lines.append(f"- … +{len(by_cat[cat]) - 40} more")
+        lines.append(
+            "\nImport with action='import_hermes', names=[...] or categories=[...] or all=true."
+        )
+        return {"results": "\n".join(lines)}
+
+    if action == "import_hermes":
+        from services.memory.hermes_skill_import import import_hermes_skills
+        hermes_dir = (args.get("hermes_dir") or "").strip() or None
+        names = args.get("names") or args.get("name")
+        if isinstance(names, str):
+            names = [n.strip() for n in names.split(",") if n.strip()]
+        categories = args.get("categories") or args.get("category")
+        if isinstance(categories, str):
+            categories = [c.strip() for c in categories.split(",") if c.strip()]
+        result = import_hermes_skills(
+            sm,
+            hermes_dir=hermes_dir,
+            names=names,
+            categories=categories,
+            all_skills=bool(args.get("all") or args.get("all_skills")),
+            owner=owner,
+            status=(args.get("status") or "published"),
+            overwrite=bool(args.get("overwrite")),
+            dry_run=bool(args.get("dry_run")),
+            max_skills=int(args.get("max_skills") or 200),
+        )
+        d = result.as_dict()
+        lines = [
+            f"Hermes import {'(dry-run) ' if d['dry_run'] else ''}from `{d['hermes_dir']}`",
+            f"imported={d['counts']['imported']} skipped={d['counts']['skipped']} failed={d['counts']['failed']}",
+        ]
+        if d["imported"]:
+            lines.append("Imported: " + ", ".join(d["imported"][:50]))
+            if len(d["imported"]) > 50:
+                lines.append(f"… +{len(d['imported']) - 50} more")
+        if d["skipped"]:
+            lines.append("Skipped (already exist): " + ", ".join(d["skipped"][:30]))
+        if d["failed"]:
+            for f in d["failed"][:10]:
+                lines.append(f"Failed {f.get('name')}: {f.get('error')}")
+        lines.append(
+            "Skills now live under data/skills/ (Odysseus SoT). Hermes dir is optional after import."
+        )
+        return {"results": "\n".join(lines), "import": d}
+
     return {
         "error": (
             f"Unknown action: {action!r}. "
-            "Use one of: list, view, view_ref, add, edit, patch, publish, delete, search."
+            "Use one of: list, view, view_ref, add, edit, patch, publish, delete, search, "
+            "list_hermes, import_hermes."
         ),
         "exit_code": 1,
     }
