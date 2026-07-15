@@ -3,6 +3,7 @@
 
 Pemakaian:
     odys install     Cek prerequisite + install dependensi + tambah PATH
+    odys doctor      Diagnostic (Python, PATH, bridge, token, server)
     odys start       Jalankan bridge + server utama
     odys stop        Matikan semua proses
     odys status      Status bridge & server
@@ -313,12 +314,15 @@ def cmd_say(args):
     token = _bridge_token()
     if not token:
         print("❌ Bridge token tidak ditemukan.")
-        print("   Jalankan `odys bridge` dulu, atau set ODY_BRIDGE_TOKEN.")
+        print("   💡 Jalankan: odys bridge")
+        print("   💡 Atau set:  ODY_BRIDGE_TOKEN=... (harus sama dengan proses bridge)")
+        print("   💡 Cek:       odys doctor")
         return 1
 
     if not _find_process_on_port(8765) and not _wait_port(8765, timeout=1):
         print("❌ Desktop Bridge tidak berjalan di port 8765.")
-        print("   Jalankan: odys bridge")
+        print("   💡 Jalankan: odys bridge   atau   odys start")
+        print("   💡 Cek:      odys doctor")
         return 1
 
     print(f'🔊 Mengucapkan: "{text}"')
@@ -331,7 +335,17 @@ def cmd_say(args):
             timeout=120,
         )
     except RuntimeError as exc:
-        print(f"❌ TTS gagal: {exc}")
+        msg = str(exc)
+        print(f"❌ TTS gagal: {msg}")
+        if "401" in msg or "Invalid bridge token" in msg:
+            print("   💡 Token mismatch — bridge pakai token beda dari CLI.")
+            print("   💡 Perbaiki: odys stop && odys bridge")
+            print("   💡 Atau set ODY_BRIDGE_TOKEN sama di kedua sisi, lalu restart.")
+        elif "503" in msg or "not configured" in msg:
+            print("   💡 Bridge token kosong di host. Restart: odys bridge")
+        elif "Tidak bisa hubungi" in msg or "Connection" in msg:
+            print("   💡 Bridge down. Jalankan: odys bridge")
+        print("   💡 Cek: odys doctor")
         return 1
 
     if out.get("ok"):
@@ -343,64 +357,137 @@ def cmd_say(args):
 
 
 def _record_mic_wav(seconds: int = 5) -> Path | None:
-    """Rekam mic Windows via PowerShell + System.Media.SoundRecorder / WASAPI fallback.
+    """Rekam mic Windows.
 
-    Prefer: sounddevice (if installed) → else PowerShell NAudio-free approach
-    using Windows Media Foundation via .NET System.Speech is not for recording.
-    Use powershell + mciSendString via winmm, or ffmpeg if available.
+    Urutan:
+      1. sounddevice (paling andal, pip install sounddevice)
+      2. ffmpeg dshow (kalau ada)
+      3. PowerShell winmm MCI waveaudio
     """
     out_path = Path(tempfile.gettempdir()) / f"odys_listen_{int(time.time())}.wav"
-    # Try ffmpeg first (cleanest)
+    errors: list[str] = []
+
+    # 1) sounddevice
     try:
+        import sounddevice as sd
+        import wave
+
+        rate = 16000
+        channels = 1
+        print("  🎙️  Engine: sounddevice")
+        frames = sd.rec(
+            int(seconds * rate),
+            samplerate=rate,
+            channels=channels,
+            dtype="int16",
+        )
+        sd.wait()
+        with wave.open(str(out_path), "wb") as wf:
+            wf.setnchannels(channels)
+            wf.setsampwidth(2)
+            wf.setframerate(rate)
+            wf.writeframes(frames.tobytes())
+        if out_path.is_file() and out_path.stat().st_size > 44:
+            return out_path
+        errors.append("sounddevice: file kosong")
+    except ImportError:
+        errors.append("sounddevice: tidak terinstall")
+    except Exception as exc:
+        errors.append(f"sounddevice: {exc}")
+
+    # 2) ffmpeg — list dshow devices, pick first audio
+    try:
+        list_out = subprocess.run(
+            ["ffmpeg", "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
+            capture_output=True, text=True, timeout=10,
+        )
+        # device names appear in stderr like: "  \"Microphone (Realtek...)\""
+        import re
+        devices = re.findall(
+            r'\"([^\"]+)\"\s+\(audio\)',
+            (list_out.stderr or "") + (list_out.stdout or ""),
+            flags=re.I,
+        )
+        if not devices:
+            # alternate format: [dshow @ ...] "Mic Name"
+            devices = re.findall(
+                r'\[dshow[^\]]*\]\s+\"([^\"]+)\"',
+                list_out.stderr or "",
+            )
+        mic_name = devices[0] if devices else "Microphone"
+        print(f"  🎙️  Engine: ffmpeg dshow ({mic_name})")
         ff = subprocess.run(
             [
                 "ffmpeg", "-y", "-f", "dshow",
-                "-i", "audio=Microphone",
+                "-i", f"audio={mic_name}",
                 "-t", str(seconds),
                 "-ac", "1", "-ar", "16000",
                 str(out_path),
             ],
-            capture_output=True, text=True, timeout=seconds + 15,
+            capture_output=True, text=True, timeout=seconds + 20,
         )
         if ff.returncode == 0 and out_path.is_file() and out_path.stat().st_size > 44:
             return out_path
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        pass
+        errors.append(f"ffmpeg: {(ff.stderr or '')[-200:]}")
+    except FileNotFoundError:
+        errors.append("ffmpeg: tidak ada di PATH")
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        errors.append(f"ffmpeg: {exc}")
 
-    # PowerShell: record via WASAPI using SoundRecorder-style MCI
-    ps = f'''
-$ErrorActionPreference = "Stop"
-$out = "{str(out_path).replace(chr(92), chr(92)+chr(92))}"
+    # 3) PowerShell MCI (winmm) — default waveaudio device
+    # Escape path for PowerShell single-quoted string
+    out_ps = str(out_path).replace("'", "''")
+    ps = f"""
+$ErrorActionPreference = 'Stop'
+$out = '{out_ps}'
 $seconds = {int(seconds)}
 Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
-public class Mci {{
-  [DllImport("winmm.dll", EntryPoint="mciSendStringA", CharSet=CharSet.Ansi)]
-  public static extern int Send(string cmd, System.Text.StringBuilder ret, int len, IntPtr hwnd);
+using System.Text;
+public static class OdysMci {{
+  [DllImport("winmm.dll", CharSet=CharSet.Ansi)]
+  public static extern int mciSendString(string cmd, StringBuilder ret, int len, IntPtr cb);
+  public static string Send(string cmd) {{
+    var sb = new StringBuilder(512);
+    int r = mciSendString(cmd, sb, sb.Capacity, IntPtr.Zero);
+    if (r != 0) throw new Exception("MCI " + r + " for: " + cmd + " -> " + sb.ToString());
+    return sb.ToString();
+  }}
 }}
 "@
-$sb = New-Object System.Text.StringBuilder 256
-[void][Mci]::Send("open new type waveaudio alias odysmic", $sb, $sb.Capacity, [IntPtr]::Zero)
-[void][Mci]::Send("set odysmic time format ms bitspersample 16 channels 1 samplespersec 16000", $sb, $sb.Capacity, [IntPtr]::Zero)
-[void][Mci]::Send("record odysmic", $sb, $sb.Capacity, [IntPtr]::Zero)
-Start-Sleep -Seconds $seconds
-[void][Mci]::Send("stop odysmic", $sb, $sb.Capacity, [IntPtr]::Zero)
-[void][Mci]::Send("save odysmic `"$out`"", $sb, $sb.Capacity, [IntPtr]::Zero)
-[void][Mci]::Send("close odysmic", $sb, $sb.Capacity, [IntPtr]::Zero)
-if (-not (Test-Path $out)) {{ throw "Record failed: $out missing" }}
-'''
+[OdysMci]::Send('open new type waveaudio alias odysmic')
+try {{
+  [OdysMci]::Send('set odysmic time format ms bitspersample 16 channels 1 samplespersec 16000 bytespersec 32000 alignment 2')
+  [OdysMci]::Send('record odysmic')
+  Start-Sleep -Seconds $seconds
+  [OdysMci]::Send('stop odysmic')
+  if (Test-Path $out) {{ Remove-Item -Force $out }}
+  [OdysMci]::Send("save odysmic `"$out`"")
+}} finally {{
+  try {{ [OdysMci]::Send('close odysmic') }} catch {{}}
+}}
+if (-not (Test-Path $out)) {{ throw 'WAV missing after MCI save' }}
+$len = (Get-Item $out).Length
+if ($len -lt 100) {{ throw "WAV too small: $len bytes" }}
+"""
     try:
+        print("  🎙️  Engine: PowerShell MCI")
         completed = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps],
-            capture_output=True, text=True, timeout=seconds + 20,
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
+            capture_output=True, text=True, timeout=seconds + 25,
         )
         if completed.returncode == 0 and out_path.is_file() and out_path.stat().st_size > 44:
             return out_path
         err = (completed.stderr or completed.stdout or "record failed").strip()
-        print(f"  ⚠️  Rekam mic gagal: {err[:300]}")
+        errors.append(f"MCI: {err[:300]}")
     except (subprocess.TimeoutExpired, OSError) as exc:
-        print(f"  ⚠️  Rekam mic error: {exc}")
+        errors.append(f"MCI: {exc}")
+
+    for e in errors:
+        print(f"  ⚠️  {e}")
+    print("  💡 Saran: pip install sounddevice")
+    print("  💡 Atau install ffmpeg + pastikan mic default Windows aktif")
     return None
 
 
@@ -453,12 +540,17 @@ def cmd_listen(args):
 
     if not _find_process_on_port(7000) and not _wait_port(7000, timeout=1):
         print("⚠️  Server utama (port 7000) sepertinya tidak jalan — STT mungkin gagal.")
-        print("   Jalankan: odys start")
+        print("   💡 Jalankan: odys start")
+        print("   💡 Cek:      odys doctor")
 
     print(f"🎤 Merekam {seconds}s... (bicara sekarang)")
     wav = _record_mic_wav(seconds)
     if not wav:
         print("❌ Gagal merekam dari microphone.")
+        print("   💡 Cek device mic di Windows Sound settings")
+        print("   💡 Saran: pip install sounddevice")
+        print("   💡 Atau install ffmpeg")
+        print("   💡 Cek: odys doctor")
         return 1
 
     print(f"  📼 File: {wav} ({wav.stat().st_size} bytes)")
@@ -466,7 +558,12 @@ def cmd_listen(args):
     try:
         out = _post_multipart_stt(wav)
     except RuntimeError as exc:
-        print(f"❌ STT gagal: {exc}")
+        msg = str(exc)
+        print(f"❌ STT gagal: {msg}")
+        if "Tidak bisa hubungi" in msg or "Connection" in msg or "10061" in msg:
+            print("   💡 Server tidak jalan atau STT endpoint tidak aktif.")
+            print("   💡 Jalankan: odys start")
+            print("   💡 Cek:      odys doctor")
         return 1
     finally:
         try:
@@ -486,6 +583,169 @@ def cmd_listen(args):
 
 def cmd_help(args):
     print(__doc__)
+
+
+# ── Doctor ───────────────────────────────────────────────
+
+def cmd_doctor(args):
+    """Diagnostic: Python, PATH, deps, bridge, token, server, Docker."""
+    import shutil
+
+    print("═══ Odys Doctor ═══")
+    print()
+    ok = True
+
+    # Python
+    py = sys.version_info
+    print(f"  Python   : {py.major}.{py.minor}.{py.micro} ", end="")
+    if py.major >= 3 and py.minor >= 11:
+        print("✅")
+    else:
+        print("❌ (butuh >= 3.11)")
+        ok = False
+
+    # pip
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "--version"],
+            capture_output=True, timeout=5, check=True,
+        )
+        print("  pip      : ✅")
+    except Exception:
+        print("  pip      : ❌")
+        ok = False
+
+    # PATH
+    odys_dir = str(ROOT).lower()
+    path_env = os.environ.get("PATH", "").lower()
+    if odys_dir in path_env or any(odys_dir in p for p in path_env.split(";")):
+        print("  PATH     : ✅ (folder project ada di PATH)")
+    else:
+        print("  PATH     : ⚠️  (folder project belum di PATH)")
+        print(f"           💡 Jalankan: odys install")
+        print(f"           💡 Atau tambah manual: {ROOT}")
+
+    # Critical imports
+    print()
+    print("  Deps     :")
+    for mod, label in (
+        ("fastapi", "fastapi"),
+        ("uvicorn", "uvicorn"),
+        ("httpx", "httpx"),
+        ("pyotp", "pyotp"),
+    ):
+        try:
+            __import__(mod)
+            print(f"    {label:12} ✅")
+        except ImportError:
+            print(f"    {label:12} ❌  → pip install {label}")
+            ok = False
+    try:
+        import win32com.client  # noqa: F401
+        print(f"    {'pywin32':12} ✅ (TTS SAPI)")
+    except ImportError:
+        print(f"    {'pywin32':12} ⚠️  (TTS fallback PowerShell)")
+
+    # Bridge
+    print()
+    print("  Bridge   :")
+    bridge_pid = _find_process_on_port(8765)
+    if bridge_pid:
+        print(f"    Port 8765 : ✅ listening (PID {bridge_pid})")
+    else:
+        print("    Port 8765 : ❌ tidak ada proses")
+        print("               💡 Jalankan: odys bridge   atau   odys start")
+        ok = False
+
+    token = (_bridge_token() or os.environ.get("ODY_BRIDGE_TOKEN") or "").strip()
+    if token:
+        print(f"    Token     : ✅ ({token[:10]}...)")
+    else:
+        print("    Token     : ❌ kosong")
+        print("               💡 odys bridge (auto-generate) atau set ODY_BRIDGE_TOKEN")
+        ok = False
+
+    try:
+        req = urllib.request.Request(
+            "http://127.0.0.1:8765/health",
+            headers={"User-Agent": "odys-doctor"},
+        )
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode())
+            print(
+                f"    Health    : ✅ {data.get('service')} · "
+                f"{data.get('app_count', '?')} apps"
+            )
+            if token:
+                # quick auth probe
+                try:
+                    auth_req = urllib.request.Request(
+                        "http://127.0.0.1:8765/command",
+                        data=json.dumps(
+                            {"command": "open_app", "args": {"app": "__doctor_probe__"}}
+                        ).encode(),
+                        headers={
+                            "Content-Type": "application/json",
+                            "X-Odys-Bridge-Token": token,
+                        },
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(auth_req, timeout=5) as ar:
+                        ar.read()
+                    print("    Auth      : ✅ token diterima")
+                except urllib.error.HTTPError as he:
+                    if he.code == 401:
+                        print("    Auth      : ❌ token mismatch (ODY_BRIDGE_TOKEN ≠ bridge)")
+                        print("               💡 odys stop && odys bridge  (token baru)")
+                        ok = False
+                    else:
+                        # 200 with ok:false for unknown app still means auth OK
+                        print(f"    Auth      : ✅ (HTTP {he.code} — token valid)")
+                except Exception as ae:
+                    print(f"    Auth      : ⚠️  {ae}")
+    except Exception as exc:
+        print(f"    Health    : ❌ {exc}")
+        ok = False
+
+    # Server
+    print()
+    print("  Server   :")
+    srv_pid = _find_process_on_port(7000)
+    if srv_pid:
+        print(f"    Port 7000 : ✅ listening (PID {srv_pid})")
+    else:
+        print("    Port 7000 : ❌ tidak ada proses")
+        print("               💡 Jalankan: odys start")
+        ok = False
+
+    # Docker optional
+    print()
+    docker = shutil.which("docker") or shutil.which("docker.exe")
+    if docker:
+        print(f"  Docker   : ✅ ({docker})")
+    else:
+        print("  Docker   : ⚠️  (opsional — container mode)")
+
+    # Mic tools for listen
+    print()
+    print("  Listen   :")
+    ffmpeg = shutil.which("ffmpeg") or shutil.which("ffmpeg.exe")
+    if ffmpeg:
+        print(f"    ffmpeg    : ✅ ({ffmpeg})")
+    else:
+        print("    ffmpeg    : ⚠️  (opsional — fallback MCI/sounddevice)")
+    try:
+        import sounddevice  # noqa: F401
+        print("    sounddevice: ✅")
+    except ImportError:
+        print("    sounddevice: ⚠️  (pip install sounddevice — rekam mic lebih andal)")
+
+    print()
+    if ok:
+        print("═══ ✅ Critical checks passed ═══")
+        return 0
+    print("═══ ⚠️  Ada issue — perbaiki item ❌ di atas ═══")
+    return 1
 
 
 # ── Install ──────────────────────────────────────────────
@@ -603,7 +863,7 @@ def main():
         usage="odys <command> [args]"
     )
     parser.add_argument("command", nargs="?", default="help", choices=[
-        "install", "start", "stop", "status", "bridge", "say", "listen", "help"
+        "install", "doctor", "start", "stop", "status", "bridge", "say", "listen", "help"
     ])
     parser.add_argument("subargs", nargs=argparse.REMAINDER)
 
@@ -611,6 +871,7 @@ def main():
 
     handlers = {
         "install": cmd_install,
+        "doctor": cmd_doctor,
         "start": cmd_start,
         "stop": cmd_stop,
         "status": cmd_status,

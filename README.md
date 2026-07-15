@@ -8,6 +8,7 @@
 
 <p align="center">
   <code>odys install</code> ·
+  <code>odys doctor</code> ·
   <code>odys start</code> ·
   <code>odys stop</code> ·
   <code>odys status</code>
@@ -48,6 +49,7 @@ Buka `http://localhost:7000`. Selesai.
 | Command | Fungsi |
 |---------|--------|
 | `odys install` | Cek prerequisite, install dependensi, tambah PATH |
+| `odys doctor` | Diagnostic: Python, PATH, deps, bridge, token, server |
 | `odys start` | Jalankan Desktop Bridge + server utama |
 | `odys stop` | Matikan semua proses |
 | `odys status` | Cek status (bridge & server) |
