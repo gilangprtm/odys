@@ -779,6 +779,28 @@ def cmd_doctor(args):
     else:
         print("  Docker   : ⚠️  (opsional — container mode)")
 
+    # Vault
+    print()
+    print("  Vault    :")
+    vault_path = None
+    try:
+        try:
+            from services.odys_vault import get_vault_path
+        except ImportError:
+            import sys as _sys
+            _sys.path.insert(0, str(ROOT))
+            from services.odys_vault import get_vault_path
+        vault_path = get_vault_path()
+        if vault_path.is_dir():
+            # count items
+            items = sum(1 for _ in vault_path.rglob("*") if _.is_file())
+            print(f"    Path      : ✅ ({vault_path}) — {items} files")
+        else:
+            print(f"    Path      : ❌ ({vault_path}) — belum ada")
+            print("               💡 odys install")
+    except Exception as exc:
+        print(f"    Path      : ⚠️  {exc}")
+
     # Mic tools for listen
     print()
     print("  Listen   :")
@@ -892,12 +914,37 @@ def cmd_install(args):
         print(f"  💡 Tambah manual: Tambahkan folder berikut ke PATH user:")
         print(f"      {odys_dir}")
 
-    # 6. Selesai
+    # 6. Odys-Vault (brain)
+    print()
+    print("Membuat Odys-Vault...")
+    try:
+        # Prefer package import; fallback to path injection for script mode
+        try:
+            from services.odys_vault import ensure_odys_vault
+        except ImportError:
+            sys.path.insert(0, str(ROOT))
+            from services.odys_vault import ensure_odys_vault
+        result = ensure_odys_vault()
+        print(f"  📁 {result['path']}")
+        if result.get("existed") and not result.get("created"):
+            print("  ℹ️  Vault sudah ada")
+        else:
+            n = len(result.get("created") or [])
+            print(f"  ✅ Vault dibuat ({n} item baru)")
+            for item in (result.get("created") or [])[:12]:
+                print(f"     · {item}")
+        print(f"  ⚙️  Config: {result.get('config_path')}")
+    except Exception as exc:
+        print(f"  ❌ Gagal buat vault: {exc}")
+        ok = False
+
+    # 7. Selesai
     print()
     if ok:
         print("═══ ✅ Install selesai ═══")
         print("Buka CMD/terminal BARU lalu ketik:")
         print("    odys start")
+        print("    odys tray --autostart")
     else:
         print("═══ ⚠️  Install selesai dengan error ═══")
         print("Cek pesan error di atas, perbaiki, lalu jalankan ulang:")
