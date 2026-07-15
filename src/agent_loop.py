@@ -4575,6 +4575,25 @@ async def stream_agent_loop(
             f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
         )
 
+        # Hermes discipline (Phase B): Intra-round context compression.
+        # Prevent context ballooning across 10+ tool rounds by compressing
+        # older tool outputs + history once we hit ~85% of soft budget.
+        try:
+            from src.context_compression import compress_messages
+            _comp_budget = soft_budget if soft_budget > 0 else 6000
+            # Only trigger compression above threshold — Hermes-style dynamic handling
+            if estimate_tokens(messages) > int(_comp_budget * 0.85):
+                _comp_target = int(_comp_budget * 0.50)
+                before_b = estimate_tokens(messages)
+                messages = compress_messages(messages, target_tokens=_comp_target, keep_last_rounds=3)
+                after_b = estimate_tokens(messages)
+                logger.info(
+                    "[context-compress] intra-round compressed %s -> %s tokens (target=%s, budget=%s)",
+                    before_b, after_b, _comp_target, _comp_budget,
+                )
+        except Exception as e:
+            logger.debug(f"[context-compress] intra-round skipped: {e}")
+
         # Separator in accumulated response
         full_response += "\n\n"
     else:
