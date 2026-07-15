@@ -73,7 +73,7 @@ Aplikasi terdaftar: ZCode, Antigravity IDE, Zed, Obsidian, Chrome, Edge, Termina
 ## Features
 
 - **Chat + Agents** — AI chat dengan tools, MCP, file, shell, skills, dan memory
-- **Desktop Bridge** — Buka aplikasi desktop dari chat (ZCode, Obsidian, Chrome, dll)
+- **Desktop Bridge** — Buka app desktop + TTS speaker dari chat (`app_api` → `/api/bridge/*`) / Settings → Services
 - **Cookbook** — Model AI recommendations, download, serving
 - **Deep Research** — Multi-step web research + report generation
 - **Documents** — AI-powered editor (Markdown, HTML, CSV)

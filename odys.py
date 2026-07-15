@@ -154,7 +154,7 @@ def cmd_bridge_stop():
 # ── Server utama ─────────────────────────────────────────
 
 def cmd_server_start(args):
-    """Jalankan server utama Odysseus."""
+    """Jalankan server utama Odys."""
     # Cek dependensi dulu
     req_file = ROOT / "requirements.txt"
     if req_file.exists():
@@ -168,11 +168,20 @@ def cmd_server_start(args):
             )
 
     port = int(os.environ.get("APP_PORT", "7000"))
-    print(f"Memulai server Odysseus di http://127.0.0.1:{port}...")
+    print(f"Memulai server Odys di http://127.0.0.1:{port}...")
+
+    # Propagate bridge token so /api/bridge/* can auth to host bridge
+    pids = _load_pids()
+    env = {**os.environ}
+    token = env.get("ODY_BRIDGE_TOKEN") or pids.get("bridge_token") or ""
+    if token:
+        env["ODY_BRIDGE_TOKEN"] = token
+    env.setdefault("ODY_BRIDGE_URL", "http://127.0.0.1:8765")
 
     proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "app:app", "--host", "127.0.0.1", "--port", str(port), "--log-level", "info"],
         cwd=ROOT,
+        env=env,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
 
@@ -180,6 +189,8 @@ def cmd_server_start(args):
         pids = _load_pids()
         pids["server"] = proc.pid
         pids["server_port"] = port
+        if token:
+            pids["bridge_token"] = token
         _save_pids(pids)
         print(f"  ✅ Server aktif (PID {proc.pid})")
         print(f"  📡 http://127.0.0.1:{port}")

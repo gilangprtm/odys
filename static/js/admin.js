@@ -3067,6 +3067,80 @@ function initLogsView() {
   loadLogs(false);
 }
 
+/* ── Desktop Bridge panel ── */
+function initBridge() {
+  const refreshBtn = el('bridge-refresh-btn');
+  const ttsBtn = el('bridge-test-tts-btn');
+  if (!refreshBtn && !ttsBtn) return;
+
+  async function loadBridge() {
+    const statusEl = el('bridge-status-text');
+    const appsCountEl = el('bridge-apps-count');
+    const appsListEl = el('bridge-apps-list');
+    const msgEl = el('bridge-msg');
+    if (statusEl) statusEl.textContent = '⏳ Loading...';
+    if (msgEl) msgEl.textContent = '';
+    try {
+      const res = await fetch('/api/bridge/health', { credentials: 'same-origin' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok && !data.ok) {
+        if (statusEl) statusEl.textContent = '❌ Unreachable';
+        if (appsCountEl) appsCountEl.textContent = '—';
+        if (msgEl) msgEl.textContent = data.detail || data.error || `HTTP ${res.status}`;
+        if (appsListEl) appsListEl.textContent = '';
+        return;
+      }
+      const ok = data.ok !== false && !data.error;
+      if (statusEl) {
+        statusEl.textContent = ok
+          ? `✅ Online · ${data.service || 'bridge'}`
+          : `❌ Offline · ${data.error || 'down'}`;
+      }
+      const n = data.app_count ?? (data.available_apps || []).length ?? '—';
+      if (appsCountEl) appsCountEl.textContent = String(n);
+      if (appsListEl) {
+        const apps = data.resolved_apps || {};
+        const lines = Object.entries(apps).map(([id, info]) => {
+          const mark = info.available ? '✅' : '❌';
+          return `${mark} ${id}${info.path ? ' · ' + info.path : ''}`;
+        });
+        appsListEl.textContent = lines.length ? lines.join('\n') : '(no apps resolved)';
+      }
+      if (msgEl && data.proxy) {
+        msgEl.textContent = `URL: ${data.proxy.bridge_url || '?'} · token: ${data.proxy.token_configured ? 'set' : 'missing'}`;
+      }
+    } catch (e) {
+      if (statusEl) statusEl.textContent = '❌ Error';
+      if (msgEl) msgEl.textContent = String(e.message || e);
+    }
+  }
+
+  if (refreshBtn) refreshBtn.addEventListener('click', () => loadBridge());
+  if (ttsBtn) {
+    ttsBtn.addEventListener('click', async () => {
+      const msgEl = el('bridge-msg');
+      if (msgEl) msgEl.textContent = '🔊 Testing speaker...';
+      try {
+        const res = await fetch('/api/bridge/tts', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: 'Odys Desktop Bridge siap.' }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          if (msgEl) msgEl.textContent = data.detail || data.message || `HTTP ${res.status}`;
+          return;
+        }
+        if (msgEl) msgEl.textContent = data.message || 'OK';
+      } catch (e) {
+        if (msgEl) msgEl.textContent = String(e.message || e);
+      }
+    });
+  }
+  loadBridge();
+}
+
 /* ═══════════════════════════════════════════
    INIT & REFRESH
    ═══════════════════════════════════════════ */
@@ -3074,7 +3148,7 @@ function initAll() {
   modalEl = el('settings-modal');
   const inits = [
     initSignupToggle, initShareDefaultsToggle, initAddUser, initEndpointForm, initMcpForm,
-    initCalDAV, initBackup, initDangerZone, initTokenForm, initLogsView,
+    initCalDAV, initBackup, initDangerZone, initTokenForm, initLogsView, initBridge,
     () => settingsModule.initIntegrations()
   ];
   for (const fn of inits) {
@@ -3091,6 +3165,10 @@ function refreshAll() {
   loadMcpServers();
   loadTokens();
   loadLogs(false);
+  // Bridge panel: refresh if card present
+  if (el('settings-bridge-card') && el('bridge-refresh-btn')) {
+    el('bridge-refresh-btn').click();
+  }
 }
 
 /* ═══════════════════════════════════════════
