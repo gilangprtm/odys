@@ -872,6 +872,10 @@
           <span id="cookbook-bg-status" style="display:none;font-size:9px;opacity:0.5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-right:12px;flex-shrink:1;min-width:0;position:relative;top:-1px;"></span>
           <span class="cookbook-notif-dot" id="cookbook-notif-dot" style="display:none;margin-left:6px;margin-right:4px;position:relative;top:-1px;left:0px;"></span>
         </div>
+        <div class="list-item" id="tool-odys-home-btn" title="Odys Home">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;opacity:0.5;"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+          <span class="grow">Odys Home</span>
+        </div>
         <div class="list-item" id="tool-odys-btn" title="Odys Projects">
           <svg width="14" height="14" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;opacity:0.5;"><circle cx="16" cy="16" r="14"/><text x="16" y="21" text-anchor="middle" font-size="18" font-weight="bold" font-family="monospace" fill="currentColor">Δ</text></svg>
           <span class="grow">Odys Projects</span>
@@ -1373,6 +1377,44 @@
           </div>
           <div id="odys-detail-msg" style="margin-top:6px;font-size:11px;min-height:18px;"></div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Odys Home Dashboard Modal -->
+  <div id="odys-home-modal" class="modal hidden">
+    <div class="modal-content" role="dialog" aria-label="Odys Home" style="width:min(640px,92vw);background:var(--bg);max-height:85vh;display:flex;flex-direction:column;">
+      <div class="modal-header">
+        <h4 style="margin:0;margin-right:auto;display:flex;align-items:center;gap:6px;">
+          <svg width="14" height="14" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2"><circle cx="16" cy="16" r="14"/><text x="16" y="21" text-anchor="middle" font-size="18" font-weight="bold" font-family="monospace" fill="currentColor">Δ</text></svg>
+          Odys Home
+        </h4>
+        <button class="close-btn" id="close-odys-home-modal" aria-label="Close Odys Home">✖</button>
+      </div>
+      <div class="modal-body" style="padding:14px;overflow-y:auto;flex:1;">
+        <div style="margin-bottom:14px;">
+          <div id="odys-home-greeting" style="font-size:18px;font-weight:600;color:var(--accent,var(--red,#00b3a0));"></div>
+          <div id="odys-home-headline" style="font-size:13px;opacity:0.8;margin-top:4px;"></div>
+        </div>
+        <div id="odys-home-status" style="margin-bottom:14px;"></div>
+        <div style="margin-bottom:14px;">
+          <div style="font-size:11px;font-weight:600;opacity:0.6;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.04em;">Recommendation</div>
+          <div id="odys-home-rec" style="font-size:13px;padding:8px 10px;border-left:3px solid var(--accent,var(--red,#00b3a0));background:var(--bg-secondary,rgba(0,0,0,0.15));border-radius:0 4px 4px 0;"></div>
+        </div>
+        <div style="margin-bottom:14px;">
+          <div style="font-size:11px;font-weight:600;opacity:0.6;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.04em;">Priorities</div>
+          <div id="odys-home-priorities" style="display:flex;flex-direction:column;gap:6px;"></div>
+        </div>
+        <div style="margin-bottom:14px;">
+          <div style="font-size:11px;font-weight:600;opacity:0.6;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.04em;">Recent Projects</div>
+          <div id="odys-home-projects"></div>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;">
+          <button type="button" class="admin-btn-sm" id="odys-home-refresh-btn">⟳ Refresh</button>
+          <button type="button" class="admin-btn-sm" id="odys-home-speak-btn">🔊 Speak</button>
+          <button type="button" class="admin-btn-sm" id="odys-home-open-projects-btn">Δ Projects</button>
+        </div>
+        <div id="odys-home-msg" style="margin-top:8px;font-size:11px;min-height:18px;"></div>
       </div>
     </div>
   </div>

@@ -711,6 +711,10 @@ app.include_router(bridge_router)
 from routes.odys_projects_routes import router as odys_projects_router
 app.include_router(odys_projects_router)
 
+# Odys Home (briefing + status)
+from routes.odys_home_routes import router as odys_home_router
+app.include_router(odys_home_router)
+
 # Cleanup
 from routes.cleanup_routes import setup_cleanup_routes
 app.include_router(setup_cleanup_routes(session_manager))

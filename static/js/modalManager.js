@@ -1418,6 +1418,7 @@ const _AUTO_WIRE = {
   'compare-model-overlay':{ rail: 'rail-compare',   sidebar: 'tool-compare-btn' },
   'ge-shortcuts-modal':   { rail: null,             sidebar: null },
   'odys-modal':           { rail: null,             sidebar: 'tool-odys-btn' },
+  'odys-home-modal':      { rail: null,             sidebar: 'tool-odys-home-btn' },
   // Prompt window opens from the overflow menu (no rail/sidebar button), but
   // wiring it here makes tab-down use the new .minimized-dock-chip instead of
   // the legacy .modal-dock-item.
