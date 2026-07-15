@@ -58,6 +58,7 @@ Buka `http://localhost:7000`. Selesai.
 | `odys say "teks"` | Bicara lewat speaker Windows (SAPI) |
 | `odys listen` | Rekam mic → STT (butuh server jalan) |
 | `odys tray` | System tray icon Δ (background agent) |
+| `odys tray --autostart` | Tray + register Windows startup |
 | `odys help` | Bantuan |
 
 ### Desktop Bridge

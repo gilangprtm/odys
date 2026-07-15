@@ -589,7 +589,11 @@ def cmd_help(args):
 # ── Tray (systray) ──────────────────────────────────────
 
 def cmd_tray(args):
-    """System tray icon Δ (background agent)."""
+    """System tray icon Δ (background agent).
+
+    Args:
+        --autostart: Register Windows startup + launch tray
+    """
     tray_script = ROOT / "desktop_tray" / "tray_agent.py"
     if not tray_script.is_file():
         print("❌ desktop_tray/tray_agent.py tidak ditemukan.")
@@ -601,6 +605,22 @@ def cmd_tray(args):
     except ImportError as exc:
         print(f"❌ Butuh pystray + Pillow: pip install pystray Pillow  ({exc})")
         return 1
+
+    # Handle --autostart flag
+    subargs = getattr(args, "subargs", []) or []
+    if "--autostart" in subargs:
+        import winreg
+        exe = sys.executable
+        cmd = f'"{exe}" "{tray_script}"'
+        key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0,
+                               winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE) as k:
+                winreg.SetValueEx(k, "OdysTray", 0, winreg.REG_SZ, cmd)
+            print("✅ Autostart registered — Odys akan start otomatis pas Windows login.")
+        except Exception as e:
+            print(f"❌ Gagal register autostart: {e}")
+            return 1
 
     print("🔄 Menjalankan system tray agent...")
     print("   Ikon Δ akan muncul di taskbar (dekat jam).")
