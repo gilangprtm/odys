@@ -1,76 +1,105 @@
 <p align="center">
-  <img src="docs/odysseus-wordmark.png" alt="Odysseus" width="238">
+  <img src="docs/odysseus-wordmark.png" alt="Odys" width="180">
 </p>
 
 <p align="center">
-  A self-hosted AI workspace for chat, agents, research, documents, email, notes, calendar, and local model workflows.
+  AI operating layer — local, voice-ready, desktop-aware.
 </p>
 
 <p align="center">
-  <a href="#quick-start">Quick Start</a> ·
-  <a href="docs/setup.md">Setup Guide</a> ·
-  <a href="CONTRIBUTING.md">Contributing</a> ·
-  <a href="ROADMAP.md">Roadmap</a>
-</p>
-
-<p align="center">
-  <a href="https://repology.org/project/odysseus-ai/versions"><img src="https://repology.org/badge/vertical-allrepos/odysseus-ai.svg" alt="Packaging status"></a>
-</p>
-
-<p align="center">
-  <img src="docs/odysseus-browser.jpg" alt="Odysseus interface">
+  <code>odys install</code> ·
+  <code>odys start</code> ·
+  <code>odys stop</code> ·
+  <code>odys status</code>
 </p>
 
 ---
 
 ## Quick Start
 
-> `dev` is the default branch and gets the newest changes first. Use [`main`](https://github.com/pewdiepie-archdaemon/odysseus/tree/main) if you want the more curated branch.
-
-```bash
-git clone https://github.com/pewdiepie-archdaemon/odysseus.git
-cd odysseus
-cp .env.example .env
-docker compose up -d --build
+```powershell
+git clone https://github.com/gilangprtm/odys.git
+cd odys
+odys install
 ```
 
-Open `http://localhost:7000` when the containers are healthy. The first admin password is printed in `docker compose logs odysseus`.
+Buka terminal **baru**, lalu:
 
-Native installs, GPU notes, Windows/macOS instructions, HTTPS, and configuration live in the [setup guide](docs/setup.md).
+```powershell
+odys start
+```
+
+Buka `http://localhost:7000`. Selesai.
+
+### Prerequisite
+
+| Tool | Minimal | Catatan |
+|------|---------|---------|
+| Python | 3.11 | `python --version` |
+| pip | (ikut Python) | `python -m pip --version` |
+| Docker | (opsional) | Hanya untuk container mode |
+
+`odys install` cek semuanya otomatis + install dependensi + tambah PATH.
+
+---
+
+## Commands
+
+| Command | Fungsi |
+|---------|--------|
+| `odys install` | Cek prerequisite, install dependensi, tambah PATH |
+| `odys start` | Jalankan Desktop Bridge + server utama |
+| `odys stop` | Matikan semua proses |
+| `odys status` | Cek status (bridge & server) |
+| `odys bridge` | Jalankan Desktop Bridge aja (tanpa server) |
+| `odys help` | Bantuan |
+
+### Desktop Bridge
+
+Bridge adalah service Windows yg meluncurkan **whitelisted** aplikasi desktop dari chat/perintah:
+
+```
+odys start → bridge nyala otomatis di background
+odys stop  → bridge mati
+```
+
+Aplikasi yg terdaftar: ZCode, Antigravity IDE, Zed, Obsidian, Chrome, Edge, Terminal, Explorer.
+
+---
 
 ## Features
 
-- **Chat + Agents** — local/API models, tools, MCP, files, shell, skills, and memory.
-- **Cookbook** — hardware-aware model recommendations, downloads, and serving.
-- **Deep Research** — multi-step web research with source reading and report generation.
-- **Compare** — blind side-by-side model testing and synthesis.
-- **Documents** — writing-first editor with AI edits, suggestions, Markdown, HTML, CSV, and syntax highlighting.
-- **Email** — IMAP/SMTP inbox with triage, tags, summaries, reminders, and reply drafts.
-- **Notes, Tasks + Calendar** — reminders, todos, scheduled agent tasks, and CalDAV sync.
-- **Extras** — gallery/image editor, themes, uploads, web search, presets, sessions, and 2FA.
+- **Chat + Agents** — AI chat dengan tools, MCP, file, shell, skills, dan memory
+- **Desktop Bridge** — Buka aplikasi desktop dari chat (ZCode, Obsidian, Chrome, dll)
+- **Cookbook** — Model AI recommendations, download, serving
+- **Deep Research** — Multi-step web research + report generation
+- **Documents** — AI-powered editor (Markdown, HTML, CSV)
+- **Email** — IMAP/SMTP inbox, summaries, reminders, reply drafts
+- **Notes, Tasks + Calendar** — reminders, todos, CalDAV sync
+- **Voice** — STT/TTS ready (aktifkan di Settings)
+- **Themes** — Blueprint UI, multiple neon themes
 
-## Demo
+---
 
-A full hover-to-play tour lives on the landing page: [`docs/index.html`](docs/index.html).
+## Untuk Developer
 
-## Contributing
+```powershell
+pip install -r requirements.txt
+pip install -r desktop_bridge\requirements.txt
 
-Help is welcome. The best entry points are fresh-install testing, provider setup bugs, mobile/editor polish, docs, and small focused refactors. See [CONTRIBUTING.md](CONTRIBUTING.md) and [ROADMAP.md](ROADMAP.md).
+# Jalankan langsung tanpa CLI
+python launcher.py
+```
 
-## Security
-
-Odysseus is a self-hosted workspace with powerful local tools. Keep auth enabled, keep private data out of Git, and do not expose raw model/service ports publicly. Deployment details are in the [setup guide](docs/setup.md#security-notes).
-
-## Star History
-
-<a href="https://www.star-history.com/?repos=pewdiepie-archdaemon%2Fodysseus&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=pewdiepie-archdaemon/odysseus&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=pewdiepie-archdaemon/odysseus&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=pewdiepie-archdaemon/odysseus&type=date&legend=top-left" />
- </picture>
-</a>
+---
 
 ## License
 
-AGPL-3.0-or-later -- see [LICENSE](LICENSE) and [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md).
+AGPL-3.0-or-later — see [LICENSE](LICENSE).
+
+---
+
+<p align="center">
+  Dibangun dari <a href="https://github.com/pewdiepie-archdaemon/odysseus">Odysseus</a>.
+  DNA sendiri. Semua kode yg masuk adalah milik kita.
+</p>

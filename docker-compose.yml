@@ -22,6 +22,9 @@ services:
       - EMBEDDING_URL=${EMBEDDING_URL:-}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-}
       - EMBEDDING_API_KEY=${EMBEDDING_API_KEY:-}
+      # Desktop Bridge (Windows host)
+      - ODY_BRIDGE_URL=${ODY_BRIDGE_URL:-http://host.docker.internal:8765}
+      - ODY_BRIDGE_TOKEN=${ODY_BRIDGE_TOKEN:-}
       - ODYSSEUS_INPROCESS_POLLERS=0
       - ODYSSEUS_INPROCESS_TASKS=1
       - ODYSSEUS_SCRIPT_HOST=localhost

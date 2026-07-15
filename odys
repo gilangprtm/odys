@@ -1,0 +1,6 @@
+#!/bin/bash
+# odys — CLI untuk manage Odys (bash/git-bash version)
+# Taruh folder project ini di PATH
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+python "$SCRIPT_DIR/odys.py" "$@"

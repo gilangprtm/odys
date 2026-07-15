@@ -1,0 +1,88 @@
+{
+  "apps": [
+    {
+      "id": "zcode",
+      "display_name": "ZCode",
+      "aliases": ["zcode", "code editor", "open zcode"],
+      "type": "folder_exe",
+      "path": "%LOCALAPPDATA%\\Programs\\ZCode",
+      "exe": "ZCode.exe",
+      "env_path_key": "ODY_ZCODE_PATH",
+      "fallback_paths": [
+        "%LOCALAPPDATA%\\Programs\\ZCode\\ZCode.exe"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "antigravity",
+      "display_name": "Antigravity IDE",
+      "aliases": ["antigravity", "antigravity ide", "ide"],
+      "type": "folder_exe",
+      "path": "%LOCALAPPDATA%\\Programs\\Antigravity IDE",
+      "exe": "Antigravity IDE.exe",
+      "env_path_key": "ODY_ANTIGRAVITY_PATH",
+      "enabled": true
+    },
+    {
+      "id": "zed",
+      "display_name": "Zed",
+      "aliases": ["zed", "zed editor"],
+      "type": "folder_exe",
+      "path": "%LOCALAPPDATA%\\Programs\\Zed",
+      "exe": "Zed.exe",
+      "env_path_key": "ODY_ZED_PATH",
+      "enabled": true
+    },
+    {
+      "id": "obsidian",
+      "display_name": "Obsidian",
+      "aliases": ["obsidian", "vault", "notes"],
+      "type": "folder_exe",
+      "path": "%LOCALAPPDATA%\\Programs\\Obsidian",
+      "exe": "Obsidian.exe",
+      "env_path_key": "ODY_OBSIDIAN_PATH",
+      "enabled": true
+    },
+    {
+      "id": "chrome",
+      "display_name": "Google Chrome",
+      "aliases": ["chrome", "google chrome", "browser"],
+      "type": "folder_exe",
+      "path": "C:\\Program Files\\Google\\Chrome\\Application",
+      "exe": "chrome.exe",
+      "env_path_key": "ODY_CHROME_PATH",
+      "fallback_paths": [
+        "%LOCALAPPDATA%\\Google\\Chrome\\Application\\chrome.exe"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "edge",
+      "display_name": "Microsoft Edge",
+      "aliases": ["edge", "microsoft edge", "msedge"],
+      "type": "folder_exe",
+      "path": "C:\\Program Files (x86)\\Microsoft\\Edge\\Application",
+      "exe": "msedge.exe",
+      "env_path_key": "ODY_EDGE_PATH",
+      "enabled": true
+    },
+    {
+      "id": "terminal",
+      "display_name": "Windows Terminal",
+      "aliases": ["terminal", "windows terminal", "cmd", "command prompt"],
+      "type": "folder_exe",
+      "path": "%LOCALAPPDATA%\\Microsoft\\WindowsApps",
+      "exe": "wt.exe",
+      "env_path_key": "ODY_TERMINAL_PATH",
+      "enabled": true
+    },
+    {
+      "id": "explorer",
+      "display_name": "File Explorer",
+      "aliases": ["explorer", "file explorer", "folder", "browse"],
+      "type": "windows_builtin",
+      "exe": "explorer.exe",
+      "enabled": true
+    }
+  ]
+}

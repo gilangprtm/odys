@@ -7,12 +7,19 @@ Handles:
 - Spawning system tray icon via pystray and Pillow (lazy-loaded).
 - Auto-opening default browser pointing to the running backend.
 - Launching the FastAPI server (importing and running app.py).
+- Auto-starting Desktop Bridge (Windows host) for app launching.
 """
+
+import logging
 import os
+import secrets
+import subprocess
 import sys
 import threading
 import time
 import webbrowser
+
+logger = logging.getLogger("odys-launcher")
 
 # Define a dummy NullWriter to suppress standard stream crashes (isatty etc.) in GUI mode
 class NullWriter:
@@ -124,19 +131,62 @@ def open_browser(url):
     webbrowser.open(url)
 
 
+def _start_desktop_bridge() -> subprocess.Popen | None:
+    """Start Desktop Bridge as background subprocess (Windows host only)."""
+    if sys.platform != "win32":
+        return None
+    bridge_dir = os.path.join(os.path.dirname(__file__), "desktop_bridge")
+    bridge_script = os.path.join(bridge_dir, "desktop_bridge.py")
+    if not os.path.isfile(bridge_script):
+        logger.info("desktop_bridge.py not found — skipping bridge startup")
+        return None
+
+    token = os.environ.get("ODY_BRIDGE_TOKEN") or secrets.token_urlsafe(32)
+    os.environ.setdefault("ODY_BRIDGE_TOKEN", token)
+
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, bridge_script],
+            cwd=bridge_dir,
+            env={**os.environ},
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        logger.info("Desktop Bridge started (PID %d, token: %s…)", proc.pid, token[:12])
+        return proc
+    except Exception as exc:
+        logger.warning("Failed to start Desktop Bridge: %s", exc)
+        return None
+
+
+def _stop_desktop_bridge(proc: subprocess.Popen | None):
+    """Terminate bridge process on shutdown."""
+    if proc and proc.poll() is None:
+        logger.info("Shutting down Desktop Bridge (PID %d)…", proc.pid)
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
+
 if __name__ == "__main__":
     import uvicorn
-    # Import the FastAPI app from app.py
     from app import app
 
     bind_host = os.getenv("APP_BIND", "127.0.0.1")
     bind_port = int(os.getenv("APP_PORT", "7000"))
     url = f"http://{bind_host}:{bind_port}"
 
+    # ── auto-start Desktop Bridge (Windows host) ──
+    bridge_proc = _start_desktop_bridge()
+
     if getattr(sys, 'frozen', False):
-        # Start browser manager thread
         threading.Thread(target=open_browser, args=(url,), daemon=True).start()
-        # Start system tray manager thread
         threading.Thread(target=setup_system_tray, args=(url,), daemon=True).start()
 
-    uvicorn.run(app, host=bind_host, port=bind_port, log_level="info")
+    try:
+        uvicorn.run(app, host=bind_host, port=bind_port, log_level="info")
+    finally:
+        _stop_desktop_bridge(bridge_proc)
