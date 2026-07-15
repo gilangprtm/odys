@@ -41,11 +41,29 @@ SKILL_EXTRACT_PROMPT = (
 )
 
 # Skills the model is unsure about (or that read as one-offs) add clutter —
-# drop anything below this confidence.
+# drop anything below this confidence. Overridden at runtime by
+# settings.skill_autosave_min_confidence / user skill_min_confidence.
 MIN_CONFIDENCE = 0.6
 
 # How many recent messages to include
 CONTEXT_WINDOW = 12
+
+
+def _effective_min_confidence(owner: Optional[str] = None) -> float:
+    """Resolve auto-learn confidence floor: user pref → global setting → default."""
+    try:
+        from src.settings import get_setting
+        default_min = float(get_setting("skill_autosave_min_confidence", MIN_CONFIDENCE) or MIN_CONFIDENCE)
+    except Exception:
+        default_min = MIN_CONFIDENCE
+    try:
+        from routes.prefs_routes import _load_for_user
+        prefs = _load_for_user(owner) or {}
+        if prefs.get("skill_min_confidence") is not None:
+            return max(0.0, min(1.0, float(prefs["skill_min_confidence"])))
+    except Exception:
+        pass
+    return max(0.0, min(1.0, default_min))
 
 
 def _skill_dicts(skills):
@@ -246,10 +264,11 @@ async def maybe_extract_skill(
             _conf = float(data.get("confidence", 0.7))
         except (TypeError, ValueError):
             _conf = 0.7
-        if _conf < MIN_CONFIDENCE:
+        _min_conf = _effective_min_confidence(owner)
+        if _conf < _min_conf:
             logger.debug(
                 "[skill-extract] '%s' below confidence floor (%.2f < %.2f) — dropped",
-                title, _conf, MIN_CONFIDENCE,
+                title, _conf, _min_conf,
             )
             return None
 
