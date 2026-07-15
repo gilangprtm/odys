@@ -31,6 +31,8 @@ secrets.env~
 dev-docs/
 docs/
 *.md
+!builtin_skills/**
+!builtin_skills/**/*.md
 *.db
 *.sqlite
 *.sqlite3

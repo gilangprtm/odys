@@ -6,8 +6,6 @@ services:
     volumes:
       - ${APP_DATA_DIR:-./data}:/app/data:z
       - ${APP_LOGS_DIR:-./logs}:/app/logs:z
-      # Hermes skills bridge (read-only) — host Windows path via env or default
-      - ${HERMES_SKILLS_HOST:-C:/Users/gilang/AppData/Local/hermes/skills}:/hermes-skills:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
@@ -27,7 +25,6 @@ services:
       - ODYSSEUS_INPROCESS_POLLERS=0
       - ODYSSEUS_INPROCESS_TASKS=1
       - ODYSSEUS_SCRIPT_HOST=localhost
-      - HERMES_SKILLS_DIR=/hermes-skills
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
     depends_on:

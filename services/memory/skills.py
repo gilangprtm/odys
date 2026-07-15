@@ -60,13 +60,28 @@ def _to_float(x, default: float = 0.0) -> float:
 
 
 class SkillsManager:
-    """Read/write SKILL.md files under <data_dir>/skills/."""
+    """Read/write SKILL.md files under <data_dir>/skills/.
 
-    def __init__(self, data_dir: str):
+    Also loads packaged built-in skills (Hermes-parity) from
+    ``ODYSSEUS_BUILTIN_SKILLS_DIR`` / ``builtin_skills/`` (read-only).
+    User skills in data/skills always win on name collision.
+    """
+
+    def __init__(self, data_dir: str, builtin_skills_dir: Optional[str] = None):
         self.data_dir = data_dir
         self.skills_root = os.path.join(data_dir, "skills")
         self.usage_file = os.path.join(self.skills_root, "_usage.json")
         self.legacy_file = os.path.join(data_dir, "skills.json")  # back-compat
+        if builtin_skills_dir is None:
+            try:
+                from src.constants import BUILTIN_SKILLS_DIR
+                builtin_skills_dir = BUILTIN_SKILLS_DIR
+            except Exception:
+                builtin_skills_dir = os.path.join(
+                    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                    "builtin_skills",
+                )
+        self.builtin_skills_dir = builtin_skills_dir or ""
         os.makedirs(self.skills_root, exist_ok=True)
 
     # ----------------------------------------------------------------------
@@ -156,12 +171,29 @@ class SkillsManager:
     # Disk scan
     # ----------------------------------------------------------------------
 
-    def _iter_skill_files(self) -> Iterable[str]:
-        if not os.path.isdir(self.skills_root):
-            return
-        for root, _dirs, files in os.walk(self.skills_root, followlinks=False):
-            if "SKILL.md" in files:
-                yield os.path.join(root, "SKILL.md")
+    def _is_builtin_path(self, path: str) -> bool:
+        if not self.builtin_skills_dir or not path:
+            return False
+        try:
+            return os.path.commonpath(
+                [os.path.realpath(self.builtin_skills_dir), os.path.realpath(path)]
+            ) == os.path.realpath(self.builtin_skills_dir)
+        except ValueError:
+            return False
+
+    def _iter_skill_files(self, *, include_builtin: bool = True) -> Iterable[str]:
+        """Yield SKILL.md paths. User data first, then built-ins (caller dedupes)."""
+        roots: List[str] = []
+        if os.path.isdir(self.skills_root):
+            roots.append(self.skills_root)
+        if include_builtin and self.builtin_skills_dir and os.path.isdir(self.builtin_skills_dir):
+            roots.append(self.builtin_skills_dir)
+        for base in roots:
+            for root, dirs, files in os.walk(base, followlinks=False):
+                # Skip noise
+                dirs[:] = [d for d in dirs if d not in ("__pycache__", ".git", "node_modules", "index-cache")]
+                if "SKILL.md" in files:
+                    yield os.path.join(root, "SKILL.md")
 
     def _read_skill(self, path: str) -> Optional[Skill]:
         try:
@@ -193,9 +225,11 @@ class SkillsManager:
             return 0
         valid_owners = set(valid_owners or [])
         changed = 0
-        for path in self._iter_skill_files():
+        for path in self._iter_skill_files(include_builtin=False):
             sk = self._read_skill(path)
             if not sk:
+                continue
+            if self._is_builtin_path(path):
                 continue
             owner = (sk.owner or "").strip()
             if owner == primary_owner:
@@ -215,15 +249,43 @@ class SkillsManager:
     # ----------------------------------------------------------------------
 
     def load_all(self) -> List[Dict]:
-        """Return every skill as a plain dict, plus any legacy JSON entries."""
+        """Return every skill as a plain dict, plus any legacy JSON entries.
+
+        Built-in skills (``builtin_skills/``) are always included as published
+        with ``source=builtin``. User skills in data/skills win on name clash.
+        """
         usage = self._load_usage()
         out: List[Dict] = []
         seen_names: set[str] = set()
-        for path in self._iter_skill_files():
+        for path in self._iter_skill_files(include_builtin=True):
             sk = self._read_skill(path)
             if not sk:
                 continue
+            if sk.name in seen_names:
+                # data/skills already claimed this name — skip later builtin copy
+                continue
             d = sk.to_dict()
+            is_builtin = self._is_builtin_path(path)
+            if is_builtin:
+                d["_builtin"] = True
+                d["source"] = d.get("source") or "builtin"
+                # Built-ins are always available in the index
+                if d.get("status") not in ("published", None):
+                    d["status"] = "published"
+                if not d.get("status"):
+                    d["status"] = "published"
+                d["status"] = "published"
+                # Infer category from path if empty
+                if not d.get("category") or d.get("category") == "general":
+                    try:
+                        rel = os.path.relpath(os.path.dirname(path), self.builtin_skills_dir)
+                        parts = [p for p in rel.replace("\\", "/").split("/") if p and p != "."]
+                        if len(parts) >= 2:
+                            d["category"] = parts[0]
+                        elif len(parts) == 1:
+                            d["category"] = parts[0]
+                    except Exception:
+                        pass
             u = self._usage_entry(usage, sk.name, sk.owner)
             d["uses"] = int(u.get("uses", 0))
             d["last_used"] = u.get("last_used")
@@ -279,12 +341,14 @@ class SkillsManager:
         entries = self.load_all()
         if owner is None:
             return entries
-        # SECURITY: strict ownership filter. The previous predicate also
-        # included skills with NO owner field (`not s.get("owner")`), which
-        # leaked legacy / un-stamped skills to every authenticated user.
-        # Hide them now; the owner needs to be backfilled on disk if those
-        # skills should be visible to a specific user.
-        return [s for s in entries if s.get("owner") == owner]
+        # Built-in / packaged skills are global (no owner stamp) and visible
+        # to every user. User skills stay owner-scoped.
+        return [
+            s for s in entries
+            if s.get("_builtin")
+            or s.get("source") == "builtin"
+            or s.get("owner") == owner
+        ]
 
     # ----------------------------------------------------------------------
     # CRUD — disk-backed
@@ -433,6 +497,8 @@ class SkillsManager:
         """`skill_id` is the slug name. Allows updating any field plus
         renames if `name` changes (file is moved on disk).
 
+        Built-in skills under ``builtin_skills/`` are read-only.
+
         The call is owner-scoped: it matches a skill on disk only if
         `skill.owner == owner` (string compare; both empty-string and
         None mean "ownerless"). When `owner is None` (the default), the
@@ -444,10 +510,13 @@ class SkillsManager:
         `updates` is also ignored — ownership is not an editable field
         via this path; rename or admin tooling is required for that.
         """
-        for path in self._iter_skill_files():
+        for path in self._iter_skill_files(include_builtin=True):
             sk = self._read_skill(path)
             if not sk or sk.name != skill_id:
                 continue
+            if self._is_builtin_path(path):
+                logger.warning("Refusing to update built-in skill %s", skill_id)
+                return False
             if (sk.owner or "") != (owner or ""):
                 continue
 
@@ -503,10 +572,13 @@ class SkillsManager:
         return False
 
     def delete_skill(self, skill_id: str, owner: Optional[str] = None) -> bool:
-        for path in self._iter_skill_files():
+        for path in self._iter_skill_files(include_builtin=True):
             sk = self._read_skill(path)
             if not sk or sk.name != skill_id:
                 continue
+            if self._is_builtin_path(path):
+                logger.warning("Refusing to delete built-in skill %s", skill_id)
+                return False
             if (sk.owner or "") != (owner or ""):
                 continue
             skill_dir = os.path.dirname(path)
@@ -542,11 +614,12 @@ class SkillsManager:
     # ----------------------------------------------------------------------
 
     def read_skill_md(self, name: str, owner: Optional[str] = None) -> Optional[str]:
-        for path in self._iter_skill_files():
+        for path in self._iter_skill_files(include_builtin=True):
             sk = self._read_skill(path)
             if not sk or sk.name != name:
                 continue
-            if (sk.owner or "") != (owner or ""):
+            is_builtin = self._is_builtin_path(path)
+            if not is_builtin and (sk.owner or "") != (owner or ""):
                 continue
             try:
                 with open(path, encoding="utf-8") as f:
@@ -558,11 +631,12 @@ class SkillsManager:
     def read_skill_reference(self, name: str, ref_path: str, owner: Optional[str] = None) -> Optional[str]:
         """Read a sub-file under the skill's directory (references/, etc).
         Refuses path traversal."""
-        for path in self._iter_skill_files():
+        for path in self._iter_skill_files(include_builtin=True):
             sk = self._read_skill(path)
             if not sk or sk.name != name:
                 continue
-            if (sk.owner or "") != (owner or ""):
+            is_builtin = self._is_builtin_path(path)
+            if not is_builtin and (sk.owner or "") != (owner or ""):
                 continue
             base = os.path.realpath(os.path.dirname(path))
             target = os.path.realpath(os.path.join(base, ref_path))

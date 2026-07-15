@@ -2165,61 +2165,12 @@ def _build_base_prompt(
             skill_idx = _sm.index_for(owner=owner, active_toolsets=active_tools) or []
             lines = ["## Available skills",
                      "Procedures the assistant should consult before doing domain work. "
-                     "Fetch Odysseus skills with `manage_skills` action=view name=<name> "
+                     "Fetch skills with `manage_skills` action=view name=<name> "
                      "when one looks relevant. Entries tagged `(draft)` were written by the "
                      "teacher-escalation loop after a prior failure — treat them as authoritative "
                      "guidance; if you follow one and it works, that's a good signal the procedure "
-                     "is correct. Hermes bridge skills: use `read_file` on the listed path "
-                     "(SKILL.md) when relevant — they are read-only mirrors of Hermes procedures."]
-
-            # --- HERMES SKILL BRIDGE (read-only index) ---
-            # Docker: mount host skills at HERMES_SKILLS_DIR (default /hermes-skills)
-            try:
-                hermes_skills_dir = (
-                    os.environ.get("HERMES_SKILLS_DIR")
-                    or "/hermes-skills"
-                )
-                if not os.path.isdir(hermes_skills_dir):
-                    # Host/dev fallback (Windows Hermes home)
-                    _win = os.path.join(
-                        os.path.expanduser("~"), "AppData", "Local", "hermes", "skills"
-                    )
-                    if os.path.isdir(_win):
-                        hermes_skills_dir = _win
-                if os.path.isdir(hermes_skills_dir):
-                    import glob
-                    h_skills = []
-                    for md_path in glob.glob(
-                        os.path.join(hermes_skills_dir, "**", "SKILL.md"), recursive=True
-                    ):
-                        try:
-                            with open(md_path, "r", encoding="utf-8", errors="replace") as f:
-                                content = f.read(4096)
-                            nm = os.path.basename(os.path.dirname(md_path))
-                            desc = "Hermes skill"
-                            if content.startswith("---"):
-                                parts = content.split("---", 2)
-                                if len(parts) >= 3:
-                                    fm_text = parts[1]
-                                    for line in fm_text.splitlines():
-                                        ls = line.strip()
-                                        if ls.startswith("name:"):
-                                            nm = ls.split(":", 1)[1].strip().strip("\"'") or nm
-                                        elif ls.startswith("description:"):
-                                            desc = ls.split(":", 1)[1].strip().strip("\"'") or desc
-                                            if len(desc) > 160:
-                                                desc = desc[:157] + "..."
-                            h_skills.append(
-                                f"- `{nm}` — {desc} *(Hermes; path: {md_path})*"
-                            )
-                        except Exception:
-                            pass
-                    if h_skills:
-                        lines.append("\n**(Hermes Global Skills — read-only bridge)**")
-                        lines.extend(h_skills[:40])  # token budget
-            except Exception as e:
-                logger.debug(f"Hermes skill bridge skipped: {e}")
-            # ---------------------------
+                     "is correct. Built-in skills ship with Odysseus (read-only); user skills live "
+                     "under data/skills/ and can be created via auto-learn or manage_skills."]
 
             by_cat: dict[str, list] = {}
             for s in skill_idx:

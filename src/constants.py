@@ -10,6 +10,12 @@ APP_VERSION = "1.0.1"
 BASE_DIR = os.path.join(get_app_root(), "")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 DATA_DIR = os.getenv("ODYSSEUS_DATA_DIR", get_default_data_dir())
+# Packaged Hermes-parity skills shipped with Odysseus (read-only SoT).
+# User-learned / custom skills still live under DATA_DIR/skills/.
+BUILTIN_SKILLS_DIR = os.getenv(
+    "ODYSSEUS_BUILTIN_SKILLS_DIR",
+    os.path.join(BASE_DIR, "builtin_skills"),
+)
 
 # Data file paths
 # Single source of truth: every persisted file/dir lives under DATA_DIR, which
