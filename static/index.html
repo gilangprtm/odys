@@ -880,6 +880,10 @@
           <svg width="14" height="14" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;opacity:0.5;"><circle cx="16" cy="16" r="14"/><text x="16" y="21" text-anchor="middle" font-size="18" font-weight="bold" font-family="monospace" fill="currentColor">Δ</text></svg>
           <span class="grow">Odys Projects</span>
         </div>
+        <div class="list-item" id="tool-odys-council-btn" title="Odys Council">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;opacity:0.5;"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          <span class="grow">Odys Council</span>
+        </div>
         <div class="list-item" id="tool-research-btn">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;opacity:0.5;"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
           <span class="grow">Deep Research</span>
@@ -1415,6 +1419,41 @@
           <button type="button" class="admin-btn-sm" id="odys-home-open-projects-btn">Δ Projects</button>
         </div>
         <div id="odys-home-msg" style="margin-top:8px;font-size:11px;min-height:18px;"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Odys Council Modal -->
+  <div id="odys-council-modal" class="modal hidden">
+    <div class="modal-content" role="dialog" aria-label="Odys Council" style="width:min(780px,94vw);background:var(--bg);max-height:88vh;display:flex;flex-direction:column;">
+      <div class="modal-header">
+        <h4 style="margin:0;margin-right:auto;display:flex;align-items:center;gap:6px;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          Odys Council
+        </h4>
+        <button class="close-btn" id="close-odys-council-modal" aria-label="Close Odys Council">✖</button>
+      </div>
+      <div class="modal-body" style="padding:14px;overflow-y:auto;flex:1;">
+        <div style="font-size:11px;opacity:0.6;margin-bottom:10px;">5 agents · report-only pipeline · klik agent untuk run action</div>
+        <div id="odys-council-pods" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px;margin-bottom:14px;"></div>
+        <div id="odys-council-msg" style="min-height:24px;margin-bottom:10px;font-size:12px;"></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+          <div>
+            <div style="font-size:11px;font-weight:600;opacity:0.6;margin-bottom:6px;text-transform:uppercase;">Queue</div>
+            <div id="odys-council-queue" style="font-size:12px;"></div>
+          </div>
+          <div>
+            <div style="font-size:11px;font-weight:600;opacity:0.6;margin-bottom:6px;text-transform:uppercase;">Reports</div>
+            <div id="odys-council-report-list" style="max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;"></div>
+          </div>
+        </div>
+        <div id="odys-council-report" style="display:none;margin-top:14px;border-top:1px solid var(--border);padding-top:12px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <h3 id="odys-council-report-name" style="margin:0;font-size:14px;"></h3>
+            <button type="button" class="admin-btn-sm" id="odys-council-report-close">Close</button>
+          </div>
+          <div id="odys-council-report-body" style="font-size:12px;line-height:1.5;max-height:40vh;overflow-y:auto;"></div>
+        </div>
       </div>
     </div>
   </div>

@@ -1136,6 +1136,27 @@ function initializeEventListeners() {
       odysHomeModal.classList.add('hidden');
     });
   }
+
+  // Odys Council tool button
+  const toolOdysCouncilBtn = el('tool-odys-council-btn');
+  const odysCouncilModal = el('odys-council-modal');
+  if (toolOdysCouncilBtn && odysCouncilModal) {
+    toolOdysCouncilBtn.addEventListener('click', async () => {
+      odysCouncilModal.classList.remove('hidden');
+      try {
+        const mod = await import('./js/odysCouncil.js');
+        await mod.initOdysCouncil({ showToast: typeof showToast === 'function' ? showToast : undefined });
+      } catch (e) {
+        console.error('Odys Council load failed', e);
+      }
+    });
+  }
+  const closeOdysCouncilBtn = el('close-odys-council-modal');
+  if (closeOdysCouncilBtn && odysCouncilModal) {
+    closeOdysCouncilBtn.addEventListener('click', () => {
+      odysCouncilModal.classList.add('hidden');
+    });
+  }
   // Refresh notes due-reminder badge on load and every 5 minutes
   if (notesModule && notesModule.refreshDueBadge) {
     notesModule.refreshDueBadge();
