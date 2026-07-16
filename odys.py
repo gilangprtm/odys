@@ -821,6 +821,9 @@ def cmd_doctor(args):
         by = stats.get("by_type") or {}
         if by:
             print(f"    Types     : {', '.join(f'{k}={v}' for k, v in by.items())}")
+        # Optional light vault sync hint when no vault_note nodes
+        if not by.get("vault_note"):
+            print("    Vault sync: 💡 POST /api/odys/neurons/sync-vault  (index Odys-Vault notes)")
     except Exception as exc:
         print(f"    Graph     : ⚠️  {exc}")
 

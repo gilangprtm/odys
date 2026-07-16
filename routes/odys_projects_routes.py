@@ -41,19 +41,40 @@ def api_scan_projects(request: Request):
     return result
 
 
-@router.post("/{project_id}/index")
-def api_index_project(project_id: str, request: Request):
-    """Index satu proyek: git diff + file count."""
-    _require_admin(request)
-    result = index_project(project_id)
-    return result
-
-
 @router.get("/{project_id}/detail")
 def api_project_detail(project_id: str, request: Request):
     """Detail satu proyek (HQ data)."""
     _require_admin(request)
     result = get_project_detail(project_id)
+    # Neuron Phase 3: project open → ensure project node + activate
+    try:
+        from services.odys_neuron_hooks import on_project_selected
+        p = (result or {}).get("project") or {}
+        label = p.get("name") or project_id
+        text = " ".join(
+            str(x) for x in (
+                label,
+                p.get("detected_type"),
+                p.get("detected_stack"),
+                p.get("path"),
+            ) if x
+        )
+        on_project_selected(project_id, label=label, text=text)
+    except Exception:
+        pass
+    return result
+
+
+@router.post("/{project_id}/index")
+def api_index_project(project_id: str, request: Request):
+    """Index satu proyek: git diff + file count."""
+    _require_admin(request)
+    result = index_project(project_id)
+    try:
+        from services.odys_neuron_hooks import on_project_selected
+        on_project_selected(project_id, label=project_id, text=f"indexed {project_id}")
+    except Exception:
+        pass
     return result
 
 

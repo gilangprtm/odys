@@ -87,3 +87,11 @@ def api_strengthen(body: StrengthenBody, request: Request):
 def api_decay(request: Request):
     _require_admin(request)
     return neurons.decay()
+
+
+@router.post("/sync-vault")
+def api_sync_vault(request: Request):
+    """Phase 3: scan Odys-Vault markdown → vault_note nodes (+ wikilink edges)."""
+    _require_admin(request)
+    from services.odys_neuron_hooks import sync_vault_notes
+    return sync_vault_notes()
