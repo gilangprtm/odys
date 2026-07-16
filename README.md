@@ -29,9 +29,12 @@ Buka terminal **baru**, lalu:
 
 ```powershell
 odys start
+odys tray --autostart   # opsional: tray Δ + wake word
 ```
 
 Buka `http://localhost:7000`. Selesai.
+
+`odys install` juga membuat **Odys-Vault** di `Documents/Odys-Vault` (brain).
 
 ### Prerequisite
 
@@ -41,23 +44,23 @@ Buka `http://localhost:7000`. Selesai.
 | pip | (ikut Python) | `python -m pip --version` |
 | Docker | (opsional) | Hanya untuk container mode |
 
-`odys install` cek semuanya otomatis + install dependensi + tambah PATH.
-
 ---
 
 ## Commands
 
 | Command | Fungsi |
 |---------|--------|
-| `odys install` | Cek prerequisite, install dependensi, tambah PATH |
-| `odys doctor` | Diagnostic: Python, PATH, deps, bridge, token, server |
-| `odys start` | Jalankan Desktop Bridge + server utama |
+| `odys install` | Prereq, deps, PATH, buat Odys-Vault |
+| `odys doctor` | Diagnostic: Python, PATH, deps, bridge, server, vault, neurons, mic |
+| `odys doctor --decay` | Doctor + neuron decay sekali |
+| `odys decay` | Neuron edge decay (forget weak links) |
+| `odys start` | Bridge + server + **brain warm-up** (vault sync / project seed / decay) |
 | `odys stop` | Matikan semua proses |
 | `odys status` | Cek status (bridge & server) |
-| `odys bridge` | Jalankan Desktop Bridge aja (tanpa server) |
-| `odys say "teks"` | Bicara lewat speaker Windows (SAPI) |
-| `odys listen` | Rekam mic → STT (butuh server jalan) |
-| `odys tray` | System tray icon Δ (background agent) |
+| `odys bridge` | Desktop Bridge saja |
+| `odys say "teks"` | TTS speaker Windows (SAPI) |
+| `odys listen` | Rekam mic → STT (butuh server) |
+| `odys tray` | System tray icon Δ |
 | `odys tray --autostart` | Tray + register Windows startup |
 | `odys help` | Bantuan |
 
@@ -73,19 +76,49 @@ odys say "selamat pagi tuan"  → suara dari speaker
 
 Aplikasi terdaftar: ZCode, Antigravity IDE, Zed, Obsidian, Chrome, Edge, Terminal, Explorer.
 
+### Tray + wake word
+
+```
+odys tray              # icon Δ di system tray
+odys tray --autostart  # + start otomatis saat login Windows
+```
+
+- Monitor health bridge (8765) + server (7000)
+- Quick actions: buka UI, stop, say, wake toggle
+- Wake word **"Sira..."** (Vosk offline) → rekam + STT
+
+### Vault + Neurons
+
+| Path | Peran |
+|------|-------|
+| `Documents/Odys-Vault` | Permanent brain (wiki, sessions, philosophy) |
+| `data/odys_neurons/graph.json` | Activation graph (local) |
+| `~/.odys/config.json` | vault_path + sync/decay timestamps |
+
+**Natural (otomatis):**
+
+- `odys start` → sync vault notes, seed projects, light decay
+- Chat → co-activate memories + inject active thoughts (silent)
+- Project scan/open → project nodes
+- Tidak perlu klik Sync Vault / Decay (tombol Home = fallback)
+
+Detail: vault note `wiki/neurons.md` (setelah install).
+
 ---
 
 ## Features
 
-- **Chat + Agents** — AI chat dengan tools, MCP, file, shell, skills, dan memory
-- **Desktop Bridge** — Buka app desktop + TTS speaker dari chat (`app_api` → `/api/bridge/*`) / Settings → Services
-- **Cookbook** — Model AI recommendations, download, serving
-- **Deep Research** — Multi-step web research + report generation
-- **Documents** — AI-powered editor (Markdown, HTML, CSV)
-- **Email** — IMAP/SMTP inbox, summaries, reminders, reply drafts
-- **Notes, Tasks + Calendar** — reminders, todos, CalDAV sync
-- **Voice** — STT/TTS di chat + `odys say` lewat speaker Windows
-- **Themes** — Blueprint UI, multiple neon themes
+- **Chat + Agents** — tools, MCP, file, shell, skills, memory
+- **Neurons** — activation layer (weight + decay) di atas memory + vault
+- **Desktop Bridge** — buka app + TTS (`/api/bridge/*`)
+- **Project HQ / Home / Council** — scan projects, briefing, multi-agent reports
+- **Cookbook** — model recommendations
+- **Deep Research** — multi-step research + report
+- **Documents** — editor Markdown/HTML/CSV
+- **Email** — IMAP/SMTP, summaries, drafts
+- **Notes, Tasks + Calendar**
+- **Voice** — STT/TTS + `odys say` + wake word tray
+- **Themes** — Blueprint UI, neon themes
 
 ---
 
@@ -97,6 +130,17 @@ pip install -r desktop_bridge\requirements.txt
 
 # Jalankan langsung tanpa CLI
 python launcher.py
+# atau
+python -m uvicorn app:app --host 127.0.0.1 --port 7000
+```
+
+Neuron API (admin auth):
+
+```
+GET  /api/odys/neurons/status
+POST /api/odys/neurons/activate
+POST /api/odys/neurons/sync-vault
+POST /api/odys/neurons/decay
 ```
 
 ---
@@ -108,6 +152,5 @@ AGPL-3.0-or-later — see [LICENSE](LICENSE).
 ---
 
 <p align="center">
-  Dibangun dari <a href="https://github.com/pewdiepie-archdaemon/odysseus">Odysseus</a>.
-  DNA sendiri. Semua kode yg masuk adalah milik kita.
+  Odys DNA. Local-first. Evidence over claims.
 </p>

@@ -896,6 +896,22 @@ def cmd_doctor(args):
     except Exception as exc:
         print(f"    Graph     : ⚠️  {exc}")
 
+    # Tray (optional resident agent)
+    print()
+    print("  Tray     :")
+    tray_script = ROOT / "desktop_tray" / "tray_agent.py"
+    if tray_script.is_file():
+        try:
+            import pystray  # noqa: F401
+            from PIL import Image  # noqa: F401
+            print("    Agent     : ✅ pystray + Pillow ready")
+            print(f"    Script    : ✅ {tray_script.name}")
+            print("               💡 odys tray  |  odys tray --autostart")
+        except ImportError:
+            print("    Agent     : ⚠️  pip install pystray Pillow")
+    else:
+        print("    Agent     : ❌ desktop_tray/tray_agent.py missing")
+
     # Mic tools for listen
     print()
     print("  Listen   :")
