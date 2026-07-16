@@ -296,6 +296,32 @@ class ChatProcessor:
                 except Exception as _ne:
                     logger.debug("Neuron hook skipped: %s", _ne)
 
+            # Neuron natural: inject active thoughts as soft context (not shown as "memory")
+            try:
+                from services.odys_neuron_hooks import active_thoughts_for_chat
+                _thoughts = active_thoughts_for_chat(query=message or "", top_k=5)
+                if _thoughts:
+                    lines = []
+                    for t in _thoughts:
+                        label = (t.get("label") or t.get("ref") or "").strip()
+                        if not label:
+                            continue
+                        kind = t.get("type") or "note"
+                        lines.append(f"- ({kind}) {label}")
+                    if lines:
+                        preface.append(untrusted_context_message(
+                            "active context (internal)",
+                            (
+                                "Related context from recent work. Use only if helpful; "
+                                "do not mention this list unless asked.
+"
+                                + "
+".join(lines)
+                            ),
+                        ))
+            except Exception as _ne:
+                logger.debug("Neuron active thoughts inject skipped: %s", _ne)
+
             # (skills index injection moved out — see below; only fires in
             # agent mode so chat mode and incognito stay clean.)
 

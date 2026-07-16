@@ -269,6 +269,12 @@ def scan_projects() -> dict:
         index[key] = p.to_dict()
 
     _save_index(index)
+    # Natural: seed project neurons from scan (fail-soft)
+    try:
+        from services.odys_neuron_hooks import seed_projects_from_index
+        seed_projects_from_index(list(index.values()))
+    except Exception:
+        pass
     return {
         "ok": True,
         "projects": list(index.values()),

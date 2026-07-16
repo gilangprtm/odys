@@ -226,3 +226,143 @@ def sync_vault_notes(vault_path: Path | str | None = None, *, link_wikilinks: bo
         "wikilink_edges": linked,
         "stats": st,
     }
+
+
+
+# ── Natural maintenance (silent, automatic) ───────────────
+
+_LAST_SYNC_KEY = "last_vault_sync_at"
+_LAST_DECAY_KEY = "last_decay_at"
+
+
+def _cfg_get() -> dict:
+    try:
+        from services.odys_vault import load_config
+        return load_config() or {}
+    except Exception:
+        return {}
+
+
+def _cfg_set(updates: dict) -> None:
+    try:
+        from services.odys_vault import load_config, save_config
+        cfg = load_config() or {}
+        cfg.update(updates)
+        save_config(cfg)
+    except Exception as e:
+        logger.debug("neuron cfg_set failed: %s", e)
+
+
+def _hours_since(iso: str | None) -> float:
+    if not iso:
+        return 1e9
+    try:
+        import time as _t
+        t0 = _t.mktime(_t.strptime(iso[:19], "%Y-%m-%dT%H:%M:%S"))
+        return (_t.time() - t0) / 3600.0
+    except Exception:
+        return 1e9
+
+
+def seed_projects_from_index(projects: list[dict] | None = None) -> dict[str, Any]:
+    """Upsert project nodes from Project HQ index (silent)."""
+    try:
+        if projects is None:
+            from services.odys_projects_service import list_projects
+            projects = list_projects()
+    except Exception as e:
+        return {"ok": False, "message": str(e), "seeded": 0}
+
+    seeded = 0
+    for p in projects or []:
+        pid = p.get("id") or p.get("name")
+        if not pid:
+            continue
+        label = p.get("name") or pid
+        text = " ".join(
+            str(x) for x in (
+                label,
+                p.get("detected_type"),
+                " ".join(p.get("detected_stack") or []),
+                p.get("path"),
+            ) if x
+        )
+        if ensure_project_node(str(pid), label=label, text=text):
+            seeded += 1
+    return {"ok": True, "seeded": seeded}
+
+
+def natural_boot(*, force_sync: bool = False, force_decay: bool = False) -> dict[str, Any]:
+    """Run on odys start — silent vault sync + light decay + project seed.
+
+    Rules (natural, not noisy):
+    - vault sync if never / older than 6h
+    - decay if never / older than 24h
+    - always try seed projects from existing index (cheap)
+    """
+    import time as _t
+    out: dict[str, Any] = {"ok": True, "actions": []}
+    cfg = _cfg_get()
+    now = _t.strftime("%Y-%m-%dT%H:%M:%S")
+
+    # 1) vault sync
+    last_sync = cfg.get(_LAST_SYNC_KEY)
+    if force_sync or _hours_since(last_sync) >= 6:
+        r = sync_vault_notes()
+        out["vault_sync"] = r
+        out["actions"].append("vault_sync")
+        if r.get("ok"):
+            _cfg_set({_LAST_SYNC_KEY: now})
+    else:
+        out["vault_sync"] = {"ok": True, "skipped": True, "hours_since": round(_hours_since(last_sync), 2)}
+
+    # 2) project seed
+    try:
+        sp = seed_projects_from_index()
+        out["project_seed"] = sp
+        if sp.get("seeded"):
+            out["actions"].append("project_seed")
+    except Exception as e:
+        out["project_seed"] = {"ok": False, "message": str(e)}
+
+    # 3) light decay
+    last_decay = cfg.get(_LAST_DECAY_KEY)
+    if force_decay or _hours_since(last_decay) >= 24:
+        neurons = _safe_import()
+        if neurons:
+            d = neurons.decay()
+            out["decay"] = d
+            out["actions"].append("decay")
+            if d.get("ok"):
+                _cfg_set({_LAST_DECAY_KEY: now})
+        else:
+            out["decay"] = {"ok": False, "message": "no service"}
+    else:
+        out["decay"] = {"ok": True, "skipped": True, "hours_since": round(_hours_since(last_decay), 2)}
+
+    return out
+
+
+def active_thoughts_for_chat(query: str = "", top_k: int = 5) -> list[dict[str, Any]]:
+    """Return compact active thoughts for silent chat injection."""
+    neurons = _safe_import()
+    if not neurons:
+        return []
+    try:
+        act = neurons.activate(query=query or "", top_k=top_k)
+        rows = []
+        for r in (act.get("results") or [])[:top_k]:
+            # skip ultra-weak noise
+            if float(r.get("score") or 0) < 0.25:
+                continue
+            rows.append({
+                "type": r.get("type"),
+                "label": r.get("label"),
+                "ref": r.get("ref"),
+                "score": r.get("score"),
+                "why": r.get("why"),
+            })
+        return rows
+    except Exception as e:
+        logger.debug("active_thoughts_for_chat failed: %s", e)
+        return []
