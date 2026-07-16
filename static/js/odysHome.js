@@ -5,7 +5,13 @@ let _deps = {};
 let _data = null;
 
 function el(id) { return document.getElementById(id); }
-function esc(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function esc(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
 
 function _fmtDate(ts) {
   if (!ts) return '—';
@@ -25,7 +31,22 @@ function _typeBadge(t) {
     project: '#00b3a0',
   };
   const c = colors[t] || 'var(--fg)';
-  return `<span style="font-size:10px;padding:1px 5px;border-radius:3px;border:1px solid ${c};color:${c};opacity:0.9;">${esc(t)}</span>`;
+  return `<span style="font-size:10px;padding:1px 6px;border-radius:999px;border:1px solid ${c};color:${c};opacity:0.95;letter-spacing:0.02em;">${esc(t)}</span>`;
+}
+
+function _scoreBar(score) {
+  const s = Math.max(0, Math.min(1, Number(score) || 0));
+  const pct = Math.round(s * 100);
+  // teal → blue gradient by strength
+  const hue = 170 - Math.round(s * 40); // 170 teal → 130 green-blue
+  const fill = `hsl(${hue} 70% 42%)`;
+  return `
+    <div style="display:flex;align-items:center;gap:8px;margin-top:4px;">
+      <div style="flex:1;height:5px;border-radius:999px;background:rgba(127,127,127,0.18);overflow:hidden;">
+        <div style="width:${pct}%;height:100%;background:${fill};border-radius:999px;transition:width .25s ease;"></div>
+      </div>
+      <span style="font-size:11px;font-variant-numeric:tabular-nums;opacity:0.7;min-width:34px;text-align:right;">${s.toFixed(2)}</span>
+    </div>`;
 }
 
 async function _fetchBriefing() {
@@ -57,8 +78,12 @@ function _renderNeurons() {
   const stats = n.stats || {};
   if (statsEl) {
     const cold = stats.cold_start ? ' · cold' : '';
+    const by = stats.by_type || {};
+    const typeBits = Object.keys(by).length
+      ? ' · ' + Object.entries(by).map(([k, v]) => `${k[0]}${v}`).join(' ')
+      : '';
     statsEl.textContent = n.ok
-      ? `${stats.node_count || 0}n · ${stats.edge_count || 0}e${cold}`
+      ? `${stats.node_count || 0}n · ${stats.edge_count || 0}e${cold}${typeBits}`
       : (n.message || 'offline');
   }
 
@@ -71,17 +96,29 @@ function _renderNeurons() {
     box.innerHTML = '<div class="admin-empty" style="font-size:12px;">No active thoughts yet. Chat or Sync Vault.</div>';
     return;
   }
-  box.innerHTML = active.map(a => `
-    <div style="font-size:12px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);display:flex;flex-direction:column;gap:2px;">
+
+  // normalize bar relative to top score so top always full-ish
+  const maxScore = Math.max(...active.map(a => Number(a.score) || 0), 0.01);
+
+  box.innerHTML = active.map((a, i) => {
+    const score = Number(a.score) || 0;
+    const rel = score / maxScore;
+    const rank = i + 1;
+    return `
+    <div style="font-size:12px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);display:flex;flex-direction:column;gap:2px;${i === 0 ? 'box-shadow:0 0 0 1px color-mix(in srgb, var(--accent, #00b3a0) 35%, transparent);' : ''}">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
-        <span style="font-weight:600;">${esc(a.label)}</span>
-        <span style="opacity:0.55;font-size:11px;">${(a.score ?? 0).toFixed(2)}</span>
-      </div>
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+        <div style="display:flex;align-items:center;gap:6px;min-width:0;">
+          <span style="font-size:10px;opacity:0.45;font-variant-numeric:tabular-nums;min-width:14px;">#${rank}</span>
+          <span style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(a.label)}</span>
+        </div>
         ${_typeBadge(a.type)}
-        <span style="font-size:10px;opacity:0.5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60%;">${esc(a.why || a.ref || '')}</span>
       </div>
-    </div>`).join('');
+      ${_scoreBar(rel)}
+      <div style="font-size:10px;opacity:0.5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px;">
+        ${esc(a.why || a.ref || '')}
+      </div>
+    </div>`;
+  }).join('');
 }
 
 function _render() {
