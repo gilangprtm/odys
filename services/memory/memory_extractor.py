@@ -457,6 +457,13 @@ async def extract_and_store(
                 except Exception as e:
                     logger.warning(f"Memory vector add failed for {entry['id']}: {e}")
 
+            # Neuron Phase 2: register new fact as node (fail-soft)
+            try:
+                from services.odys_neuron_hooks import on_memory_created
+                on_memory_created(entry)
+            except Exception as _ne:
+                logger.debug("Neuron on_memory_created skipped: %s", _ne)
+
             added += 1
 
         if added > 0:

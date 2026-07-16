@@ -285,6 +285,17 @@ class ChatProcessor:
                 except Exception as _e:
                     logger.warning("Failed to increment memory uses: %s", _e)
 
+            # Neuron Phase 2: co-activation of injected memories (fail-soft)
+            if _used_ids:
+                try:
+                    from services.odys_neuron_hooks import on_memory_injected
+                    _mem_by_id = {m.get("id"): m for m in mem_entries if m.get("id")}
+                    _injected = [_mem_by_id[i] for i in _used_ids if i in _mem_by_id]
+                    if _injected:
+                        on_memory_injected(_injected, query=message or "")
+                except Exception as _ne:
+                    logger.debug("Neuron hook skipped: %s", _ne)
+
             # (skills index injection moved out — see below; only fires in
             # agent mode so chat mode and incognito stay clean.)
 
