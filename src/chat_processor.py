@@ -309,15 +309,15 @@ class ChatProcessor:
                         kind = t.get("type") or "note"
                         lines.append(f"- ({kind}) {label}")
                     if lines:
+                        nl = chr(10)
+                        body = (
+                            "Related context from recent work. Use only if helpful; "
+                            "do not mention this list unless asked." + nl
+                            + nl.join(lines)
+                        )
                         preface.append(untrusted_context_message(
                             "active context (internal)",
-                            (
-                                "Related context from recent work. Use only if helpful; "
-                                "do not mention this list unless asked.
-"
-                                + "
-".join(lines)
-                            ),
+                            body,
                         ))
             except Exception as _ne:
                 logger.debug("Neuron active thoughts inject skipped: %s", _ne)

@@ -102,3 +102,7 @@ compound.config.json
 *.error.log
 _scratch/
 /odysseus/
+
+# Odys runtime (local PIDs + bridge token — never commit)
+.odys_pids.json
+.odys/
