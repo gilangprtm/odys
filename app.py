@@ -719,6 +719,10 @@ app.include_router(odys_home_router)
 from routes.odys_council_routes import router as odys_council_router
 app.include_router(odys_council_router)
 
+# Odys Neuron activation layer
+from routes.odys_neuron_routes import router as odys_neuron_router
+app.include_router(odys_neuron_router)
+
 # Cleanup
 from routes.cleanup_routes import setup_cleanup_routes
 app.include_router(setup_cleanup_routes(session_manager))

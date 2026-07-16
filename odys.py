@@ -801,6 +801,29 @@ def cmd_doctor(args):
     except Exception as exc:
         print(f"    Path      : ⚠️  {exc}")
 
+    # Neurons
+    print()
+    print("  Neurons  :")
+    try:
+        try:
+            from services.odys_neuron_service import status as neuron_status
+        except ImportError:
+            import sys as _sys
+            _sys.path.insert(0, str(ROOT))
+            from services.odys_neuron_service import status as neuron_status
+        st = neuron_status()
+        stats = st.get("stats") or {}
+        cold = " (cold start)" if stats.get("cold_start") else ""
+        print(
+            f"    Graph     : ✅ {stats.get('node_count', 0)} nodes · "
+            f"{stats.get('edge_count', 0)} edges{cold}"
+        )
+        by = stats.get("by_type") or {}
+        if by:
+            print(f"    Types     : {', '.join(f'{k}={v}' for k, v in by.items())}")
+    except Exception as exc:
+        print(f"    Graph     : ⚠️  {exc}")
+
     # Mic tools for listen
     print()
     print("  Listen   :")
