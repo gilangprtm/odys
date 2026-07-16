@@ -123,6 +123,22 @@ def _jaccard(a: set[str], b: set[str]) -> float:
     return inter / union if union else 0.0
 
 
+def _token_sim(query: set[str], doc: set[str]) -> float:
+    """Similarity for short queries vs long docs.
+
+    Pure Jaccard under-scores short queries (3 tokens vs 40-token note → ~0.07).
+    Blend Jaccard with query coverage (|inter|/|query|) so cold-start works.
+    """
+    if not query or not doc:
+        return 0.0
+    inter = len(query & doc)
+    if inter == 0:
+        return 0.0
+    j = inter / len(query | doc)
+    coverage = inter / len(query)
+    return max(j, coverage * 0.85)  # coverage dominates for short queries
+
+
 def _edge_key(a: str, b: str) -> str:
     x, y = sorted([a, b])
     return f"{x}:{y}"
@@ -336,9 +352,9 @@ class NeuronGraph:
 
         scored: list[dict[str, Any]] = []
         for n in active_nodes:
-            # cosine-like: jaccard on tokens (Phase 1 proxy)
+            # cosine-like: token sim (jaccard + query coverage blend)
             n_set = set(n.tokens)
-            sim = _jaccard(q_tokens, n_set) if q_tokens else 0.0
+            sim = _token_sim(q_tokens, n_set) if q_tokens else 0.0
             if seeds and n.id in seeds:
                 sim = max(sim, 0.8)
 
@@ -353,7 +369,7 @@ class NeuronGraph:
                     nb_node = self.nodes.get(nb_id)
                     if not nb_node or nb_node.archived:
                         continue
-                    nb_sim = _jaccard(q_tokens, set(nb_node.tokens)) if q_tokens else 0.0
+                    nb_sim = _token_sim(q_tokens, set(nb_node.tokens)) if q_tokens else 0.0
                     if nb_id in seeds:
                         nb_sim = max(nb_sim, 0.6)
                     if nb_sim >= COSINE_MIN or nb_id in seeds:

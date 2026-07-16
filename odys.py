@@ -583,7 +583,21 @@ def cmd_listen(args):
 # ── Help ─────────────────────────────────────────────────
 
 def cmd_help(args):
-    print(__doc__)
+    print("""Odys — CLI manager
+Pemakaian:
+    odys install     Cek prerequisite + install dependensi + tambah PATH + buat vault
+    odys doctor      Diagnostic (Python, PATH, deps, bridge, token, server, vault, neurons, mic)
+    odys doctor --decay   Diagnostic + run neuron decay
+    odys decay       Run neuron edge decay (forget weak links)
+    odys start       Jalankan bridge + server utama
+    odys stop        Matikan semua proses
+    odys status      Status bridge & server
+    odys bridge      Jalankan bridge aja (tanpa server utama)
+    odys say <teks>  TTS via Desktop Bridge (Windows SAPI)
+    odys listen      Rekam mic → STT server (/api/stt/transcribe)
+    odys tray        System tray icon Δ (background agent)
+        --autostart: Register Windows startup + launch tray
+    odys help        Tampilkan ini""")
 
 
 # ── Tray (systray) ──────────────────────────────────────
@@ -640,9 +654,39 @@ def cmd_tray(args):
 
 # ── Doctor ───────────────────────────────────────────────
 
+def cmd_decay(args):
+    """Run neuron edge decay once (forget weak links)."""
+    print("═══ Odys Neuron Decay ═══")
+    print()
+    try:
+        try:
+            from services.odys_neuron_service import decay, status
+        except ImportError:
+            sys.path.insert(0, str(ROOT))
+            from services.odys_neuron_service import decay, status
+        before = status().get("stats") or {}
+        print(f"  Before : {before.get('node_count', 0)} nodes · {before.get('edge_count', 0)} edges")
+        r = decay()
+        after = status().get("stats") or {}
+        print(f"  Result : {r.get('message')}")
+        print(f"  After  : {after.get('node_count', 0)} nodes · {after.get('edge_count', 0)} edges")
+        print(f"  Dropped: {r.get('dropped_edges', 0)} edges · archived {r.get('archived_nodes', 0)} nodes")
+        print()
+        print("═══ ✅ Decay selesai ═══")
+        return 0
+    except Exception as exc:
+        print(f"  ❌ {exc}")
+        return 1
+
+
 def cmd_doctor(args):
-    """Diagnostic: Python, PATH, deps, bridge, token, server, Docker."""
+    """Diagnostic: Python, PATH, deps, bridge, token, server, Docker, vault, neurons."""
     import shutil
+
+    # Optional: run decay first when --decay in subargs
+    if any(a in ("--decay", "decay") for a in (getattr(args, "subargs", None) or [])):
+        cmd_decay(args)
+        print()
 
     print("═══ Odys Doctor ═══")
     print()
@@ -989,7 +1033,7 @@ def main():
         usage="odys <command> [args]"
     )
     parser.add_argument("command", nargs="?", default="help", choices=[
-        "install", "doctor", "start", "stop", "status", "bridge", "say", "listen", "tray", "help"
+        "install", "doctor", "start", "stop", "status", "bridge", "say", "listen", "tray", "decay", "help"
     ])
     parser.add_argument("subargs", nargs=argparse.REMAINDER)
 
@@ -999,6 +1043,7 @@ def main():
         "install": cmd_install,
         "doctor": cmd_doctor,
         "tray": cmd_tray,
+        "decay": cmd_decay,
         "start": cmd_start,
         "stop": cmd_stop,
         "status": cmd_status,

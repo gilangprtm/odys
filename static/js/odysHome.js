@@ -1,5 +1,5 @@
 // static/js/odysHome.js — Odys Home Dashboard
-// Briefing, status, recent projects, recommendation.
+// Briefing, status, recent projects, Active Thoughts (neurons).
 
 let _deps = {};
 let _data = null;
@@ -18,6 +18,16 @@ function _statusDot(ok) {
     : '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#ef4444;margin-right:4px;"></span>';
 }
 
+function _typeBadge(t) {
+  const colors = {
+    memory: '#60a5fa',
+    vault_note: '#a78bfa',
+    project: '#00b3a0',
+  };
+  const c = colors[t] || 'var(--fg)';
+  return `<span style="font-size:10px;padding:1px 5px;border-radius:3px;border:1px solid ${c};color:${c};opacity:0.9;">${esc(t)}</span>`;
+}
+
 async function _fetchBriefing() {
   const res = await fetch('/api/odys/home/briefing', { credentials: 'same-origin' });
   if (!res.ok) {
@@ -25,6 +35,53 @@ async function _fetchBriefing() {
     throw new Error(body.detail || body.message || `HTTP ${res.status}`);
   }
   return res.json();
+}
+
+async function _postNeuron(path) {
+  const res = await fetch(`/api/odys/neurons/${path}`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.detail || body.message || `HTTP ${res.status}`);
+  return body;
+}
+
+function _renderNeurons() {
+  const box = el('odys-home-neurons');
+  const statsEl = el('odys-home-neuron-stats');
+  if (!box) return;
+
+  const n = (_data && _data.neurons) || {};
+  const stats = n.stats || {};
+  if (statsEl) {
+    const cold = stats.cold_start ? ' · cold' : '';
+    statsEl.textContent = n.ok
+      ? `${stats.node_count || 0}n · ${stats.edge_count || 0}e${cold}`
+      : (n.message || 'offline');
+  }
+
+  const active = n.active || [];
+  if (!n.ok) {
+    box.innerHTML = `<div class="admin-empty" style="font-size:12px;">Neurons offline. ${esc(n.message || '')}</div>`;
+    return;
+  }
+  if (!active.length) {
+    box.innerHTML = '<div class="admin-empty" style="font-size:12px;">No active thoughts yet. Chat or Sync Vault.</div>';
+    return;
+  }
+  box.innerHTML = active.map(a => `
+    <div style="font-size:12px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);display:flex;flex-direction:column;gap:2px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+        <span style="font-weight:600;">${esc(a.label)}</span>
+        <span style="opacity:0.55;font-size:11px;">${(a.score ?? 0).toFixed(2)}</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+        ${_typeBadge(a.type)}
+        <span style="font-size:10px;opacity:0.5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60%;">${esc(a.why || a.ref || '')}</span>
+      </div>
+    </div>`).join('');
 }
 
 function _render() {
@@ -81,6 +138,7 @@ function _render() {
       : '<div class="admin-empty" style="font-size:12px;">No projects</div>';
   }
 
+  _renderNeurons();
   if (msg) msg.textContent = '';
 }
 
@@ -103,7 +161,6 @@ function _bindEvents() {
   const openProjectsBtn = el('odys-home-open-projects-btn');
   if (openProjectsBtn) {
     openProjectsBtn.addEventListener('click', () => {
-      // Close home, open projects
       const homeModal = el('odys-home-modal');
       if (homeModal) homeModal.classList.add('hidden');
       document.getElementById('tool-odys-btn')?.click();
@@ -119,6 +176,40 @@ function _bindEvents() {
         const u = new SpeechSynthesisUtterance(text);
         u.lang = 'id-ID';
         window.speechSynthesis.speak(u);
+      }
+    });
+  }
+
+  const syncBtn = el('odys-home-sync-vault-btn');
+  if (syncBtn) {
+    syncBtn.addEventListener('click', async () => {
+      const msg = el('odys-home-msg');
+      if (msg) msg.textContent = '⏳ Syncing vault → neurons...';
+      try {
+        const r = await _postNeuron('sync-vault');
+        if (msg) {
+          msg.textContent = `✅ Vault: ${r.upserted || 0} notes · ${r.wikilink_edges || 0} links · ${r.files_scanned || 0} files`;
+        }
+        await refresh();
+      } catch (e) {
+        if (msg) msg.textContent = `❌ ${e.message}`;
+      }
+    });
+  }
+
+  const decayBtn = el('odys-home-decay-btn');
+  if (decayBtn) {
+    decayBtn.addEventListener('click', async () => {
+      const msg = el('odys-home-msg');
+      if (msg) msg.textContent = '⏳ Running decay...';
+      try {
+        const r = await _postNeuron('decay');
+        if (msg) {
+          msg.textContent = `✅ Decay: dropped ${r.dropped_edges || 0} edges · archived ${r.archived_nodes || 0}`;
+        }
+        await refresh();
+      } catch (e) {
+        if (msg) msg.textContent = `❌ ${e.message}`;
       }
     });
   }

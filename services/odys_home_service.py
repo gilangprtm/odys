@@ -86,6 +86,35 @@ def get_briefing() -> dict[str, Any]:
     bridge = _bridge_status()
     server = _server_status()
 
+    # Neurons: active thoughts + stats (fail-soft)
+    neurons_block: dict[str, Any] = {
+        "ok": False,
+        "stats": {},
+        "active": [],
+        "message": "",
+    }
+    try:
+        from services import odys_neuron_service as neurons
+        st = neurons.status()
+        stats = st.get("stats") or {}
+        # Prefer recent/context activation using rec recommendation keywords
+        seed_q = " ".join(
+            filter(None, [
+                (recent[0].get("name") if recent else None),
+                "odys vault neuron",
+            ])
+        )
+        act = neurons.activate(query=seed_q, top_k=6)
+        neurons_block = {
+            "ok": True,
+            "stats": stats,
+            "active": act.get("results") or [],
+            "mode": act.get("mode"),
+            "query": seed_q,
+        }
+    except Exception as e:
+        neurons_block["message"] = str(e)[:120]
+
     return {
         "ok": True,
         "greeting": greeting,
@@ -101,4 +130,5 @@ def get_briefing() -> dict[str, Any]:
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         },
         "projects": recent,
+        "neurons": neurons_block,
     }
