@@ -234,6 +234,23 @@ class NeuronGraph:
             if include_archived or not n.archived
         ]
 
+    def delete_node(self, node_id: str) -> dict[str, Any]:
+        """Delete a node and all its connected edges. Permanent, not archive."""
+        self.load()
+        if node_id not in self.nodes:
+            return {"ok": False, "message": f"node {node_id} not found"}
+        deleted_edges = 0
+        remaining = {}
+        for key, e in self.edges.items():
+            if e.source == node_id or e.target == node_id:
+                deleted_edges += 1
+            else:
+                remaining[key] = e
+        self.edges = remaining
+        del self.nodes[node_id]
+        self.save()
+        return {"ok": True, "deleted_node": node_id, "deleted_edges": deleted_edges}
+
     def strengthen(self, ids: list[str]) -> dict[str, Any]:
         """Hebbian-ish: co-activate all pairs in ids."""
         self.load()
@@ -472,6 +489,10 @@ def add_node(**kwargs) -> dict:
     g = get_graph()
     n = g.add_node(**kwargs)
     return {"ok": True, "node": n.to_dict()}
+
+
+def delete_node(node_id: str) -> dict:
+    return get_graph().delete_node(node_id)
 
 
 def strengthen(ids: list[str]) -> dict:

@@ -95,3 +95,18 @@ def api_sync_vault(request: Request):
     _require_admin(request)
     from services.odys_neuron_hooks import sync_vault_notes
     return sync_vault_notes()
+
+
+@router.post("/import-memory")
+def api_import_memory(request: Request):
+    """Import existing memory.json entries to neuron nodes."""
+    _require_admin(request)
+    from services.odys_neuron_hooks import import_all_memories_to_neurons
+    return import_all_memories_to_neurons()
+
+
+@router.delete("/nodes/{node_id}")
+def api_delete_node(node_id: str, request: Request):
+    """Permanently delete a node and all its connected edges."""
+    _require_admin(request)
+    return neurons.delete_node(node_id)

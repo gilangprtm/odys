@@ -1446,6 +1446,44 @@ async def action_cookbook_serve(
 
 # ── Registry ────────────────────────────────────────────────────────────────
 
+# ── Neuron actions ────────────────────────────────────────────────────────
+
+async def action_neuron_decay(owner: str = "", **kwargs) -> Tuple[str, bool]:
+    """Run neuron graph decay — drop weak edges, archive stale nodes."""
+    try:
+        from services import odys_neuron_service as neurons
+        result = neurons.decay()
+        if result.get("ok"):
+            msg = (
+                f"Decayed: {result.get('dropped_edges', 0)} edges dropped, "
+                f"{result.get('archived_nodes', 0)} nodes archived, "
+                f"{result.get('edge_count', 0)} edges remaining"
+            )
+            return msg, True
+        return result.get("message", "decay failed"), False
+    except Exception as e:
+        logger.warning("neuron_decay failed: %s", e)
+        return f"neuron_decay error: {e}", False
+
+
+async def action_neuron_vault_sync(owner: str = "", **kwargs) -> Tuple[str, bool]:
+    """Sync vault markdown files to neuron graph nodes + wikilink edges."""
+    try:
+        from services.odys_neuron_hooks import sync_vault_notes
+        result = sync_vault_notes()
+        if result.get("ok"):
+            msg = (
+                f"Vault sync: {result.get('upserted', 0)} nodes, "
+                f"{result.get('wikilink_edges', 0)} wikilink edges, "
+                f"{result.get('files_scanned', 0)} files scanned"
+            )
+            return msg, True
+        return result.get("message", "vault sync failed"), False
+    except Exception as e:
+        logger.warning("neuron_vault_sync failed: %s", e)
+        return f"neuron_vault_sync error: {e}", False
+
+
 # NOTE: BUILTIN_ACTIONS is populated in __init__.py with all action functions
 # after imports are resolved, to avoid circular imports. The dict is created
 # here so actions.py remains importable standalone for testing.
@@ -1469,4 +1507,6 @@ BUILTIN_ACTION_INFO = {
     "test_skills": "Run the per-skill Test on every skill: agent run + LLM judge → records verdict on the skill (pass/needs_work/fail/inconclusive). Advisory only — never rewrites or demotes anything.",
     "audit_skills": "Audit unaudited skills after enough new skills are added: test, narrow metadata, self-edit/retry, optional teacher rewrite, tag duplicates/trivial skills, and publish/draft using the auto-approve threshold.",
     "check_email_urgency": "Scan unread emails hourly, tag urgent/reply-soon/newsletter/marketing/spam, and send a reminder when a new email needs a fast reply.",
+    "neuron_decay": "Decay all neuron edges (drop weak links, archive stale nodes)",
+    "neuron_vault_sync": "Sync Odys-Vault markdown files to neuron graph nodes",
 }

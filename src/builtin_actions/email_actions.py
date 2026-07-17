@@ -1,3 +1,47 @@
+"""
+builtin_actions.py
+
+Registry of built-in automation actions that can be executed by the task
+scheduler without needing an LLM call.
+"""
+
+import logging
+import os
+import json
+from datetime import datetime
+from typing import Tuple
+
+from src.auth_helpers import owner_filter
+from core.platform_compat import IS_WINDOWS, find_bash
+from core.constants import internal_api_base
+from src.constants import DATA_DIR, DEEP_RESEARCH_DIR, TIDY_CALENDAR_STATE_FILE, EMAIL_URGENCY_CACHE_DIR, COOKBOOK_STATE_FILE
+from src.interactive_gate import wait_for_interactive_quiet
+
+logger = logging.getLogger(__name__)
+
+
+class TaskNoop(BaseException):
+    """Raised by an action when it determined there's nothing to do.
+
+    Inherits from BaseException (not Exception) so the standard
+    `except Exception` wrappers each action uses for real error handling
+    don't accidentally catch it. The scheduler explicitly catches TaskNoop,
+    drops the queued TaskRun row, advances last_run / next_run, and exits
+    silently. Nothing appears in the Activity log; the message is logged
+    server-side only.
+    """
+
+
+class TaskDeferred(BaseException):
+    """Raised when a task should run later without recording a skipped run."""
+
+    def __init__(self, reason: str, delay_seconds: int = 20 * 60):
+        super().__init__(reason)
+        self.reason = reason
+        self.delay_seconds = delay_seconds
+
+
+
 async def action_tidy_sessions(owner: str, **kwargs) -> Tuple[str, bool]:
     """Delete empty sessions for the owner. Pure heuristic —
     the LLM folder-sort phase is skipped (user opted to keep this task
@@ -1262,24 +1306,3 @@ async def action_learn_sender_signatures(owner: str, **kwargs) -> Tuple[str, boo
         logger.error(f"learn_sender_signatures failed: {e}")
         return str(e), False
 
-
-async def action_daily_brief(owner: str, **kwargs) -> Tuple[str, bool]:
-    """Build a short morning digest: today's calendar events, unread email count
-    + top-N senders/subjects, active todos."""
-    try:
-        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
-        import json as _json
-
-        from core.database import SessionLocal, CalendarEvent, CalendarCal, Note
-        from routes.email_helpers import _imap_connect, _decode_header
-
-        # ----- Calendar: today's events -----
-        today = _dt.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        tomorrow = today + _td(days=1)
-        # v2 review HIGH-12: gate the OR-null branch on single-user
-        # (unconfigured) deploys only. In a multi-user deploy, one
-        # user's daily brief must not include another user's notes or
-        # events that happen to be stored with owner=None.
-        try:
-            from core.auth import AuthManager
-            _allow_null = not AuthManager().is_configured

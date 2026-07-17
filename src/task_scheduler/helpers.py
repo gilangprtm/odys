@@ -238,6 +238,8 @@ HOUSEKEEPING_DEFAULTS = {
     "classify_events":      {"name": "Calendar Classify Events", "schedule": "cron",  "scheduled_time": None,    "cron_expression": "0 6,18 * * *", "ship_paused": True, "legacy_names": ["Classify Calendar Events"]},
     "check_email_urgency":   {"name": "Email Tags",               "schedule": "cron",  "scheduled_time": None,    "cron_expression": "0 * * * *", "ship_paused": True, "old_cron_expressions": ["*/15 * * * *"], "legacy_names": ["Email Triage", "Urgent Email"]},
     "audit_skills":          {"name": "Skills Audit",             "trigger_type": "event", "trigger_event": "skill_added", "trigger_count": 5, "schedule": None, "scheduled_time": None, "cron_expression": None, "legacy_names": ["Audit Skills"]},
+    "neuron_decay":          {"name": "Neuron Decay",             "schedule": "cron", "scheduled_time": None, "cron_expression": "0 */6 * * *", "legacy_names": ["Decay Neurons"]},
+    "neuron_vault_sync":     {"name": "Neuron Vault Sync",        "schedule": "cron", "scheduled_time": None, "cron_expression": "0 */4 * * *", "legacy_names": ["Sync Vault to Neurons"]},
 }
 
 RETIRED_HOUSEKEEPING_ACTIONS = frozenset({

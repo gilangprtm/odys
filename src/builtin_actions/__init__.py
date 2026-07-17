@@ -50,6 +50,8 @@ from .actions import (  # noqa: F401
     action_ping_notes,
     action_check_email_urgency,
     action_cookbook_serve,
+    action_neuron_decay,
+    action_neuron_vault_sync,
     BUILTIN_ACTION_INFO,
 )
 
@@ -77,6 +79,8 @@ _actions.BUILTIN_ACTIONS.update({
     "audit_skills": action_audit_skills,
     "check_email_urgency": action_check_email_urgency,
     "cookbook_serve": action_cookbook_serve,
+    "neuron_decay": action_neuron_decay,
+    "neuron_vault_sync": action_neuron_vault_sync,
 })
 
 # Re-export BUILTIN_ACTIONS from the module level so direct imports work.

@@ -24,10 +24,10 @@ def _safe_import():
         logger.debug("neuron service unavailable: %s", e)
         return None
 
-
 def ensure_memory_node(
     memory_id: str, text: str, *, category: str = "fact", pinned: bool = False
 ) -> Optional[str]:
+    """Ensure a memory node exists in the graph, then return its ID."""
     neurons = _safe_import()
     if not neurons or not memory_id or not (text or "").strip():
         return None
@@ -39,6 +39,66 @@ def ensure_memory_node(
     except Exception as e:
         logger.warning("neuron ensure_memory_node failed: %s", e)
         return None
+
+
+def import_all_memories_to_neurons(owner: str = "") -> dict[str, Any]:
+    """Bulk-import existing memory.json entries into neuron nodes. Idempotent."""
+    try:
+        from src.memory import MemoryManager as _MM
+        _sn = _safe_import()
+        if not _sn:
+            return {"ok": False, "message": "neuron service unavailable"}
+
+        mm = _MM("")
+        all_mem = mm.load(owner=owner if owner else None)
+        if not all_mem:
+            return {"ok": True, "imported": 0, "total": 0, "message": "no memories found"}
+
+        # Get existing neuron memory nodes to avoid re-import
+        existing = _sn.list_nodes()
+        existing_refs = {n.ref for n in existing if n.type == "memory"}
+
+        imported = 0
+        skipped = 0
+        for m in all_mem:
+            mid = m.get("id") or ""
+            if not mid or not m.get("text"):
+                continue
+            if mid in existing_refs:
+                skipped += 1
+                continue
+            base = 0.9 if m.get("pinned") or m.get("category") == "identity" else 0.5
+            try:
+                _sn.add_node(
+                    type="memory",
+                    label=(m["text"][:60]),
+                    ref=str(mid),
+                    base_weight=base,
+                    text=m["text"],
+                )
+                imported += 1
+            except Exception:
+                pass
+
+        # Auto-strengthen co-occurring memories (from same chat session)
+        all_ids = [n.id for n in _sn.list_nodes() if n.type == "memory" and n.id in {r.id for r in _sn.list_nodes()}]
+        if len(all_ids) >= 2:
+            # Strengthen the first batch of imported memories as a cluster
+            new_ids = [n.id for n in _sn.list_nodes() if n.type == "memory" and n.id not in existing_refs]
+            if len(new_ids) >= 2:
+                _sn.strengthen(new_ids[:10])
+
+        st = _sn.status()
+        return {
+            "ok": True,
+            "imported": imported,
+            "skipped": skipped,
+            "total": len(all_mem),
+            "graph": st.get("stats", {}),
+        }
+    except Exception as e:
+        logger.warning("import_all_memories_to_neurons failed: %s", e)
+        return {"ok": False, "message": str(e)}
 
 
 def ensure_project_node(project_id: str, label: str = "", text: str = "") -> Optional[str]:
@@ -325,7 +385,35 @@ def natural_boot(*, force_sync: bool = False, force_decay: bool = False) -> dict
     except Exception as e:
         out["project_seed"] = {"ok": False, "message": str(e)}
 
-    # 3) light decay
+    # 3) memory → neuron import (if never done)
+    try:
+        from src.memory import MemoryManager as _MM
+        _sn = _safe_import()
+        all_mem = _MM(str("")).load_all() if _MM else []
+        st = _sn.status() if _sn else {}
+        existing_count = (st.get("stats") or {}).get("node_count", 0)
+        mem_nodes = [m for m in all_mem if m.get("id") and m.get("text")]
+        if mem_nodes and existing_count < 6:  # fresh graph
+            imported = 0
+            for m in mem_nodes[:200]:
+                base = 0.9 if m.get("pinned") or m.get("category") == "identity" else 0.5
+                try:
+                    _sn.add_node(
+                        type="memory",
+                        label=(m["text"][:60]),
+                        ref=str(m["id"]),
+                        base_weight=base,
+                        text=m["text"],
+                    )
+                    imported += 1
+                except Exception:
+                    pass
+            out["memory_import"] = {"ok": True, "imported": imported, "total": len(mem_nodes)}
+            out["actions"].append("memory_import")
+    except Exception as e:
+        out["memory_import"] = {"ok": False, "message": str(e)}
+
+    # 4) light decay
     last_decay = cfg.get(_LAST_DECAY_KEY)
     if force_decay or _hours_since(last_decay) >= 24:
         neurons = _safe_import()
