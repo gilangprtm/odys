@@ -24,6 +24,15 @@ def _safe_import():
         logger.debug("neuron service unavailable: %s", e)
         return None
 
+
+def _get_graph_instance():
+    """Get the NeuronGraph instance directly (not the module-level API wrapper)."""
+    try:
+        from services import odys_neuron_service as neurons
+        return neurons.get_graph()
+    except Exception:
+        return None
+
 def ensure_memory_node(
     memory_id: str, text: str, *, category: str = "fact", pinned: bool = False
 ) -> Optional[str]:
@@ -324,6 +333,71 @@ def _hours_since(iso: str | None) -> float:
         return 1e9
 
 
+def sync_sessions_to_neurons(owner: str = "") -> dict[str, Any]:
+    """Sync active chat sessions from DB to neuron nodes (Phase 2 enhancement)."""
+    neurons = _safe_import()
+    if not neurons:
+        return {"ok": False, "message": "neuron unavailable"}
+    try:
+        from core.database import SessionLocal, Session as DBSession
+        db = SessionLocal()
+        try:
+            q = db.query(DBSession).filter(
+                DBSession.archived == False,
+                DBSession.message_count > 0,
+            )
+            if owner:
+                q = q.filter((DBSession.owner == owner) | (DBSession.owner.is_(None)))
+            sessions = q.all()
+        finally:
+            db.close()
+
+        if not sessions:
+            return {"ok": True, "synced": 0, "message": "no active sessions"}
+
+        synced = 0
+        for s in sessions:
+            # Build node text from session name + metadata
+            parts = [s.name or "unnamed"]
+            if s.mode:
+                parts.append(f"mode:{s.mode}")
+            if s.message_count:
+                parts.append(f"{s.message_count} messages")
+            if s.is_important:
+                parts.append("important")
+            text = " | ".join(parts)
+
+            # Base weight: important sessions get higher weight
+            base = 0.7 if s.is_important else 0.4
+            if s.message_count and s.message_count > 10:
+                base += 0.1  # active conversations
+
+            # Upsert as session node
+            nid = neurons.add_node(
+                type="session",
+                label=s.name or "unnamed session",
+                ref=s.id,
+                base_weight=min(base, 1.0),
+                text=text,
+            )
+            synced += 1
+
+        # Strengthen co-occurring sessions from same owner
+        try:
+            graph_instance = _get_graph_instance()
+            if graph_instance:
+                session_nodes = [n for n in graph_instance.list_nodes() if n.type == "session"]
+                if len(session_nodes) >= 2:
+                    graph_instance.strengthen([n.id for n in session_nodes[:10]])
+        except Exception:
+            pass
+
+        return {"ok": True, "synced": synced, "total_sessions": len(sessions)}
+    except Exception as e:
+        logger.warning("sync_sessions_to_neurons failed: %s", e)
+        return {"ok": False, "message": str(e)}
+
+
 def seed_projects_from_index(projects: list[dict] | None = None) -> dict[str, Any]:
     """Upsert project nodes from Project HQ index (silent)."""
     try:
@@ -427,6 +501,15 @@ def natural_boot(*, force_sync: bool = False, force_decay: bool = False) -> dict
             out["decay"] = {"ok": False, "message": "no service"}
     else:
         out["decay"] = {"ok": True, "skipped": True, "hours_since": round(_hours_since(last_decay), 2)}
+
+    # 5) session sync → neurons
+    try:
+        ss = sync_sessions_to_neurons()
+        out["session_sync"] = ss
+        if ss.get("synced"):
+            out["actions"].append("session_sync")
+    except Exception as e:
+        out["session_sync"] = {"ok": False, "message": str(e)}
 
     return out
 

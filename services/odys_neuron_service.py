@@ -14,15 +14,25 @@ import math
 import re
 import time
 import uuid
+import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
+
+# TF-IDF cosine similarity (Phase 2 — upgrade from bag-of-words Jaccard)
+try:
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity as _cosine
+    import numpy as np
+    _HAS_SKLEARN = True
+except ImportError:
+    _HAS_SKLEARN = False
 
 DATA_DIR = Path("data/odys_neurons")
 GRAPH_FILE = DATA_DIR / "graph.json"
 GRAPH_BAK = DATA_DIR / "graph.json.bak"
 
-NodeType = Literal["memory", "vault_note", "project"]
+NodeType = Literal["memory", "vault_note", "project", "session"]
 
 # Activation weights (PRD §7)
 W_BASE = 0.3
@@ -106,13 +116,64 @@ def _now() -> str:
 
 
 def _tokenize(text: str) -> list[str]:
-    """Simple lowercase word tokens (Phase 1 — no embed model)."""
+    """Simple lowercase word tokens (Phase 2 — TF-IDF backend)."""
     if not text:
         return []
     words = re.findall(r"[a-zA-Z0-9_\-]{2,}", text.lower())
     # drop ultra-common noise
     stop = {"the", "and", "for", "with", "from", "that", "this", "ada", "yang", "dan", "untuk"}
     return [w for w in words if w not in stop]
+
+
+# ── TF-IDF Similarity Cache (Phase 2) ──────────────────────────────────────
+class _TfidfCache:
+    """Lazy-built TF-IDF matrix over all node tokens. Rebuilt on save() or explicit refresh."""
+    def __init__(self):
+        self._vectorizer: TfidfVectorizer | None = None
+        self._matrix = None  # sparse CSR matrix
+        self._node_ids: list[str] = []
+        self._dirty = True
+        self._lock = threading.Lock()
+
+    def mark_dirty(self):
+        self._dirty = True
+
+    def _rebuild(self, nodes: dict[str, NeuronNode]) -> None:
+        if not _HAS_SKLEARN:
+            return
+        active = [(nid, n) for nid, n in nodes.items() if not n.archived and n.tokens]
+        if not active:
+            self._node_ids = []
+            self._matrix = None
+            self._dirty = False
+            return
+        self._node_ids = [nid for nid, _ in active]
+        corpus = [" ".join(n.tokens) for _, n in active]
+        self._vectorizer = TfidfVectorizer(
+            max_features=2000,
+            ngram_range=(1, 2),
+            sublinear_tf=True,
+        )
+        self._matrix = self._vectorizer.fit_transform(corpus)
+        self._dirty = False
+
+    def query_similarity(self, query: str, nodes: dict[str, NeuronNode]) -> dict[str, float]:
+        """Return {node_id: tfidf_score} for all active nodes."""
+        if not _HAS_SKLEARN or not query.strip():
+            return {}
+        with self._lock:
+            if self._dirty or self._matrix is None:
+                self._rebuild(nodes)
+            if self._matrix is None or self._vectorizer is None:
+                return {}
+            try:
+                q_vec = self._vectorizer.transform([" ".join(_tokenize(query))])
+                sims = _cosine(q_vec, self._matrix).flatten()
+                return {self._node_ids[i]: float(sims[i]) for i in range(len(self._node_ids)) if sims[i] > 0.01}
+            except Exception:
+                return {}
+
+_tfidf = _TfidfCache()
 
 
 def _jaccard(a: set[str], b: set[str]) -> float:
@@ -124,11 +185,7 @@ def _jaccard(a: set[str], b: set[str]) -> float:
 
 
 def _token_sim(query: set[str], doc: set[str]) -> float:
-    """Similarity for short queries vs long docs.
-
-    Pure Jaccard under-scores short queries (3 tokens vs 40-token note → ~0.07).
-    Blend Jaccard with query coverage (|inter|/|query|) so cold-start works.
-    """
+    """Fallback Jaccard similarity (when sklearn unavailable)."""
     if not query or not doc:
         return 0.0
     inter = len(query & doc)
@@ -136,7 +193,7 @@ def _token_sim(query: set[str], doc: set[str]) -> float:
         return 0.0
     j = inter / len(query | doc)
     coverage = inter / len(query)
-    return max(j, coverage * 0.85)  # coverage dominates for short queries
+    return max(j, coverage * 0.85)
 
 
 def _edge_key(a: str, b: str) -> str:
@@ -153,38 +210,57 @@ class NeuronGraph:
     def load(self) -> None:
         if self._loaded:
             return
-        if GRAPH_FILE.exists():
-            try:
-                raw = json.loads(GRAPH_FILE.read_text(encoding="utf-8"))
-                self.nodes = {
-                    nid: NeuronNode.from_dict(nd)
-                    for nid, nd in (raw.get("nodes") or {}).items()
-                }
-                self.edges = {}
-                for ek, ed in (raw.get("edges") or {}).items():
-                    e = NeuronEdge.from_dict(ed)
-                    self.edges[e.key()] = e
-            except Exception:
-                self.nodes = {}
-                self.edges = {}
+        try:
+            from services.odys_neuron_db import init_db, migrate_from_json, load_all
+            init_db()
+            migrate_from_json()
+            nodes_raw, edges_raw = load_all()
+            self.nodes = {nid: NeuronNode.from_dict(nd) for nid, nd in nodes_raw.items()}
+            self.edges = {}
+            for ek, ed in edges_raw.items():
+                e = NeuronEdge.from_dict(ed)
+                self.edges[e.key()] = e
+        except Exception:
+            # Fallback to JSON if SQLite unavailable
+            if GRAPH_FILE.exists():
+                try:
+                    raw = json.loads(GRAPH_FILE.read_text(encoding="utf-8"))
+                    self.nodes = {
+                        nid: NeuronNode.from_dict(nd)
+                        for nid, nd in (raw.get("nodes") or {}).items()
+                    }
+                    self.edges = {}
+                    for ek, ed in (raw.get("edges") or {}).items():
+                        e = NeuronEdge.from_dict(ed)
+                        self.edges[e.key()] = e
+                except Exception:
+                    self.nodes = {}
+                    self.edges = {}
         self._loaded = True
 
     def save(self) -> None:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "version": 1,
-            "saved_at": _now(),
-            "nodes": {nid: n.to_dict() for nid, n in self.nodes.items()},
-            "edges": {ek: e.to_dict() for ek, e in self.edges.items()},
-        }
-        text = json.dumps(payload, indent=2, ensure_ascii=False)
-        # backup previous
-        if GRAPH_FILE.exists():
-            try:
-                GRAPH_BAK.write_text(GRAPH_FILE.read_text(encoding="utf-8"), encoding="utf-8")
-            except OSError:
-                pass
-        GRAPH_FILE.write_text(text, encoding="utf-8")
+        nodes = {nid: n.to_dict() for nid, n in self.nodes.items()}
+        edges = {ek: e.to_dict() for ek, e in self.edges.items()}
+        try:
+            from services.odys_neuron_db import save_all
+            save_all(nodes, edges)
+        except Exception:
+            # Fallback to JSON
+            payload = {
+                "version": 2,
+                "saved_at": _now(),
+                "nodes": nodes,
+                "edges": edges,
+            }
+            text = json.dumps(payload, indent=2, ensure_ascii=False)
+            if GRAPH_FILE.exists():
+                try:
+                    GRAPH_BAK.write_text(GRAPH_FILE.read_text(encoding="utf-8"), encoding="utf-8")
+                except OSError:
+                    pass
+            GRAPH_FILE.write_text(text, encoding="utf-8")
+        _tfidf.mark_dirty()
 
     def add_node(
         self,
@@ -360,6 +436,11 @@ class NeuronGraph:
 
         q_tokens = set(_tokenize(query)) if query else set()
 
+        # TF-IDF similarity (preferred) or fallback to Jaccard
+        tfidf_scores: dict[str, float] = {}
+        if query and _HAS_SKLEARN:
+            tfidf_scores = _tfidf.query_similarity(query, self.nodes)
+
         # adjacency for spread
         adj: dict[str, list[tuple[str, float]]] = {n.id: [] for n in active_nodes}
         for e in self.edges.values():
@@ -369,9 +450,12 @@ class NeuronGraph:
 
         scored: list[dict[str, Any]] = []
         for n in active_nodes:
-            # cosine-like: token sim (jaccard + query coverage blend)
-            n_set = set(n.tokens)
-            sim = _token_sim(q_tokens, n_set) if q_tokens else 0.0
+            # TF-IDF cosine similarity (preferred) or Jaccard fallback
+            if tfidf_scores:
+                sim = tfidf_scores.get(n.id, 0.0)
+            else:
+                n_set = set(n.tokens)
+                sim = _token_sim(q_tokens, n_set) if q_tokens else 0.0
             if seeds and n.id in seeds:
                 sim = max(sim, 0.8)
 
@@ -386,7 +470,11 @@ class NeuronGraph:
                     nb_node = self.nodes.get(nb_id)
                     if not nb_node or nb_node.archived:
                         continue
-                    nb_sim = _token_sim(q_tokens, set(nb_node.tokens)) if q_tokens else 0.0
+                    # TF-IDF or Jaccard for neighbor similarity
+                    if tfidf_scores:
+                        nb_sim = tfidf_scores.get(nb_id, 0.0)
+                    else:
+                        nb_sim = _token_sim(q_tokens, set(nb_node.tokens)) if q_tokens else 0.0
                     if nb_id in seeds:
                         nb_sim = max(nb_sim, 0.6)
                     if nb_sim >= COSINE_MIN or nb_id in seeds:
@@ -437,6 +525,20 @@ class NeuronGraph:
 
     def status(self) -> dict[str, Any]:
         self.load()
+        # Use SQLite stats if available (faster than iterating all nodes)
+        try:
+            from services.odys_neuron_db import stats as db_stats
+            s = db_stats()
+            s["cold_start"] = s["node_count"] < 20
+            return {
+                "ok": True,
+                "path": str(DB_FILE.resolve()) if DB_FILE.exists() else str(GRAPH_FILE),
+                "storage": "sqlite" if DB_FILE.exists() else "json",
+                "stats": s,
+            }
+        except Exception:
+            pass
+        # Fallback to in-memory stats
         nodes = list(self.nodes.values())
         active = [n for n in nodes if not n.archived]
         by_type: dict[str, int] = {}
@@ -445,6 +547,7 @@ class NeuronGraph:
         return {
             "ok": True,
             "path": str(GRAPH_FILE.resolve()) if GRAPH_FILE.exists() else str(GRAPH_FILE),
+            "storage": "json",
             "stats": {
                 "node_count": len(active),
                 "archived_count": sum(1 for n in nodes if n.archived),
