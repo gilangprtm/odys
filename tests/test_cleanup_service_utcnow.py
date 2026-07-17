@@ -1,4 +1,4 @@
-"""Regression tests for the datetime.utcnow() removal in src/cleanup_service.py (#1116).
+"""Regression tests for the datetime.now(timezone.utc).replace(tzinfo=None) removal in src/cleanup_service.py (#1116).
 
 Importing src.cleanup_service is cheap and dependency-free: its only module-level
 imports are logging/datetime/typing, and the `from src.database import ...` calls are

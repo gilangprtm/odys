@@ -121,15 +121,15 @@ def _reference_database(monkeypatch, *, upload_id: str, gallery_hash: str = None
             session_id="session-1",
             role="user",
             content=f"[Attachment: retained.png | id={upload_id} | mime=image/png]",
-            meta_data=json.dumps({
+            meta_data={
                 "attachments": [{
                     "id": upload_id,
                     "name": "retained.png",
                     "mime": "image/png",
                     "size": 8,
-                }]
-            }),
-        ))
+                        }]
+                    },
+                    ))
         if gallery_hash:
             db.add(GalleryImage(
                 id="gallery-cleanup-reference",

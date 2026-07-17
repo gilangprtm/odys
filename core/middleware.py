@@ -1,12 +1,15 @@
-# src/middleware.py
+# core/middleware.py
 # Shared middleware, decorators, and request helpers
 
+import asyncio
+import logging
 import os
 import secrets
+import time
 
 from fastapi import HTTPException, Request
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
 
 
 # Per-process token that lets the in-app tool layer hit admin-gated
@@ -60,10 +63,6 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """Add standard security headers to all responses."""
 
     async def dispatch(self, request: Request, call_next) -> Response:
-        # Generate a per-request nonce for inline scripts
-        nonce = secrets.token_hex(16)
-        request.state.csp_nonce = nonce
-
         response = await call_next(request)
         path = request.url.path
 
@@ -112,9 +111,18 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             # Migrating to nonce-only requires templating the HTML files +
             # auditing every JS-set style attribute. Since inline styles
             # don't execute script, the residual risk is visual-only.
+            content_type = response.headers.get("content-type", "").lower()
+            if content_type.startswith("text/html"):
+                nonce = secrets.token_hex(16)
+                request.state.csp_nonce = nonce
+                script_src = f"'self' 'nonce-{nonce}' https://cdn.jsdelivr.net"
+            else:
+                # API JSON responses don't need inline script execution —
+                # skip the nonce to save entropy and header bytes.
+                script_src = "'self' https://cdn.jsdelivr.net"
             response.headers["Content-Security-Policy"] = (
                 "default-src 'self'; "
-                f"script-src 'self' 'nonce-{nonce}' https://cdn.jsdelivr.net; "
+                f"script-src {script_src}; "
                 "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
                 "font-src 'self' https://cdn.jsdelivr.net; "
                 "img-src 'self' data: blob: https:; "
@@ -124,3 +132,107 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                 "frame-ancestors 'none'"
             )
         return response
+
+
+# ═══════════════════════════════════════════════════════════════
+# Middleware classes extracted from app.py (H2 refactor)
+# ═══════════════════════════════════════════════════════════════
+
+REQUEST_TIMEOUT_DEFAULT = float(os.getenv("REQUEST_HARD_TIMEOUT", "45"))
+
+# Runtime-mutable set of route prefixes exempt from the hard timeout.
+# Routes can append at module level::
+#
+#     from core.middleware import _TIMEOUT_EXEMPT_PREFIXES
+#     _TIMEOUT_EXEMPT_PREFIXES.add("/api/foo/stream")
+#
+# The @timeout_exempt decorator is a no-op marker for documentation.
+_TIMEOUT_EXEMPT_PREFIXES: set[str] = {
+    "/api/chat",
+    "/api/shell/stream",
+    "/api/research",
+    "/api/model/download",
+    "/api/model/probe",
+    "/api/model-endpoints",
+    "/api/cookbook/setup",
+    "/api/upload",
+    "/api/image",
+    "/api/memory/audit",
+}
+
+
+def timeout_exempt(route_func):
+    """Decorator: mark a route as exempt from the hard request timeout."""
+    return route_func
+
+
+class RequestTimeoutMiddleware(BaseHTTPMiddleware):
+    """Abort requests exceeding REQUEST_HARD_TIMEOUT (default 45s).
+    Whitelisted streaming/long-running paths are exempt."""
+
+    async def dispatch(self, request, call_next):
+        path = request.url.path or ""
+        if any(path.startswith(p) for p in _TIMEOUT_EXEMPT_PREFIXES):
+            return await call_next(request)
+        try:
+            return await asyncio.wait_for(call_next(request), timeout=REQUEST_TIMEOUT_DEFAULT)
+        except asyncio.TimeoutError:
+            return JSONResponse(
+                {"detail": f"Request exceeded {REQUEST_TIMEOUT_DEFAULT:.0f}s timeout"},
+                status_code=504,
+            )
+
+
+class InteractiveActivityMiddleware(BaseHTTPMiddleware):
+    """Pause background tasks during interactive foreground requests."""
+
+    async def dispatch(self, request, call_next):
+        from src.interactive_gate import should_track_interactive_request, track_interactive_request
+
+        path = request.url.path or ""
+        if not should_track_interactive_request(path, request.method):
+            return await call_next(request)
+
+        async def _stop_bg():
+            try:
+                ts = getattr(request.app.state, "_task_scheduler", None)
+                if ts:
+                    await ts.stop_background_tasks_for_foreground(
+                        reason=f"foreground request {request.method} {path}"
+                    )
+            except Exception:
+                logging.getLogger("app.foreground_gate").debug(
+                    "foreground task stop failed", exc_info=True
+                )
+
+        asyncio.create_task(_stop_bg())
+        async with track_interactive_request(path, request.method):
+            return await call_next(request)
+
+
+class SlowRequestLogMiddleware(BaseHTTPMiddleware):
+    """Log requests that take longer than ODYSSEUS_SLOW_REQUEST_LOG_SECONDS (default 0.75s)."""
+
+    async def dispatch(self, request, call_next):
+        start = time.perf_counter()
+        status = 500
+        try:
+            response = await call_next(request)
+            status = getattr(response, "status_code", 0) or 0
+            return response
+        finally:
+            elapsed = time.perf_counter() - start
+            try:
+                threshold = float(
+                    os.getenv("ODYSSEUS_SLOW_REQUEST_LOG_SECONDS", "0.75") or "0.75"
+                )
+            except Exception:
+                threshold = 0.75
+            if elapsed >= threshold:
+                logging.getLogger("app.slow_request").warning(
+                    "slow_request method=%s path=%s status=%s elapsed=%.3fs",
+                    request.method,
+                    request.url.path,
+                    status,
+                    elapsed,
+                )

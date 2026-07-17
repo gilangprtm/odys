@@ -28,7 +28,7 @@ import zipfile
 from html.parser import HTMLParser as _HTMLParser
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from email.mime.text import MIMEText
@@ -206,7 +206,7 @@ def _record_email_received_events(owner: str, account_id: str | None, folder: st
     try:
         from src.event_bus import fire_event
         account_key = (account_id or "default").strip() or "default"
-        now = datetime.utcnow().isoformat() + "Z"
+        now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
         keys = []
         for e in emails:
             key = (e.get("message_id") or e.get("uid") or "").strip()
@@ -646,7 +646,7 @@ def _email_imap_search_criteria(query: str) -> str:
 def _email_index_upsert(owner: str, account_id: str | None, folder: str, emails: list[dict]):
     if not emails:
         return
-    now = datetime.utcnow().isoformat() + "Z"
+    now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
     rows = []
     for e in emails:
         uid = str(e.get("uid") or "").strip()
@@ -724,7 +724,7 @@ def _email_index_update_flags(owner: str, account_id: str | None, folder: str, u
                 parts.discard(flag)
             conn.execute(
                 "UPDATE email_message_index SET flags=?, updated_at=? WHERE owner=? AND account_key=? AND folder=? AND uid=?",
-                (" ".join(sorted(parts)), datetime.utcnow().isoformat() + "Z", owner or "", _account_cache_key(account_id, owner), folder, str(uid)),
+                (" ".join(sorted(parts)), datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z", owner or "", _account_cache_key(account_id, owner), folder, str(uid)),
             )
             conn.commit()
         finally:
@@ -784,7 +784,7 @@ def _email_preview_cache_put(owner: str, account_id: str | None, folder: str, ui
     if not payload:
         return
     try:
-        now = datetime.utcnow().isoformat() + "Z"
+        now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
         message_id = (payload.get("message_id") or "").strip()
         stored = dict(payload)
         stored["sync"] = {"source": "preview_cache", "updated_at": now}
@@ -872,7 +872,7 @@ def _email_attachment_meta_cache_put(owner: str, account_id: str | None, folder:
                     str(uid),
                     (message_id or "").strip(),
                     json.dumps(attachments or [], ensure_ascii=False),
-                    datetime.utcnow().isoformat() + "Z",
+                    datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
                 ),
             )
             conn.commit()
@@ -1396,7 +1396,7 @@ def setup_email_routes():
             "emails": visible,
             "total": total,
             "folder": folder,
-            "sync": {"source": "fixture", "updated_at": datetime.utcnow().isoformat() + "Z"},
+            "sync": {"source": "fixture", "updated_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"},
         }
 
     def _fixture_email_read(uid: str, folder: str, owner: str) -> dict | None:
@@ -1843,7 +1843,7 @@ def setup_email_routes():
                 "sync": {
                     "source": "imap",
                     "indexed": len(cached_rows) if uid_list else 0,
-                    "updated_at": datetime.utcnow().isoformat() + "Z",
+                    "updated_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
                 },
             }
         except EmailNotConfiguredError:
@@ -2197,7 +2197,7 @@ def setup_email_routes():
                         "source": "imap",
                         "sync": {
                             "source": "imap",
-                            "updated_at": datetime.utcnow().isoformat() + "Z",
+                            "updated_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
                         },
                     }
 
@@ -2256,7 +2256,7 @@ def setup_email_routes():
                     "source": "imap",
                     "sync": {
                         "source": "imap",
-                        "updated_at": datetime.utcnow().isoformat() + "Z",
+                        "updated_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
                     },
                 }
         except Exception as e:
@@ -2873,7 +2873,7 @@ def setup_email_routes():
                 )
 
                 upload_id = f"{uuid.uuid4().hex}.pdf"
-                today = datetime.utcnow().strftime("%Y/%m/%d")
+                today = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y/%m/%d")
                 dated_dir = _os.path.join(UPLOAD_DIR, today)
                 _os.makedirs(dated_dir, exist_ok=True)
                 dest_path = _os.path.join(dated_dir, upload_id)
@@ -3223,7 +3223,7 @@ def setup_email_routes():
                 if match:
                     name = match.group(1) or match.group(2)
                     result.append(name)
-            payload = {"folders": result, "sync": {"source": "imap", "updated_at": datetime.utcnow().isoformat() + "Z"}}
+            payload = {"folders": result, "sync": {"source": "imap", "updated_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"}}
             _folder_cache_put(account_id, owner, payload)
             return payload
         except Exception as e:
@@ -3515,7 +3515,7 @@ def setup_email_routes():
         if cc:
             outer["Cc"] = cc
         outer["Subject"] = subject or ""
-        outer["Date"] = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
+        outer["Date"] = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%a, %d %b %Y %H:%M:%S +0000")
         _apply_odysseus_headers(outer, odysseus_kind or "scheduled", odysseus_ref)
         if in_reply_to:
             outer["In-Reply-To"] = in_reply_to
@@ -3563,7 +3563,7 @@ def setup_email_routes():
                 return {"success": False, "error": "send_at must be in the future"}
             # Normalize to naive UTC before storing: the poller selects due
             # rows with a lexicographic string compare against a naive
-            # datetime.utcnow().isoformat(), so storing the raw client string
+            # datetime.now(timezone.utc).replace(tzinfo=None).isoformat(), so storing the raw client string
             # makes "+02:00" schedules fire hours late, negative offsets fire
             # hours early, and a "Z" suffix compares after the fractional
             # seconds of the poller timestamp.
@@ -3588,7 +3588,7 @@ def setup_email_routes():
                 req.get("references") or None,
                 json.dumps(req.get("attachments") or []),
                 send_at,
-                datetime.utcnow().isoformat(),
+                datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
                 req.get("account_id") or None,
                 req.get("odysseus_kind") or "scheduled",
                 owner or "",
@@ -3679,7 +3679,7 @@ def setup_email_routes():
                 """UPDATE scheduled_emails
                    SET status = 'pending', send_at = ?
                    WHERE id = ? AND status = 'agent_draft' AND owner = ?""",
-                (datetime.utcnow().isoformat(), sid, owner or ""),
+                (datetime.now(timezone.utc).replace(tzinfo=None).isoformat(), sid, owner or ""),
             )
             conn.commit()
             affected = cur.rowcount
@@ -3793,7 +3793,7 @@ def setup_email_routes():
         if req.cc:
             outer["Cc"] = req.cc
         outer["Subject"] = req.subject
-        outer["Date"] = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
+        outer["Date"] = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%a, %d %b %Y %H:%M:%S +0000")
         outer["Message-ID"] = email.utils.make_msgid(domain="odysseus.local")
 
         if req.in_reply_to:
@@ -3991,7 +3991,7 @@ def setup_email_routes():
         if req.bcc:
             msg["Bcc"] = req.bcc
         msg["Subject"] = req.subject
-        msg["Date"] = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
+        msg["Date"] = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%a, %d %b %Y %H:%M:%S +0000")
 
         if req.in_reply_to:
             msg["In-Reply-To"] = req.in_reply_to
@@ -4225,7 +4225,7 @@ def setup_email_routes():
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         mid, owner, data.get("uid", ""), data.get("folder", ""),
-                        subject, sender, content, model, datetime.utcnow().isoformat(),
+                        subject, sender, content, model, datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
                     ))
                     _c.commit()
                     _c.close()
@@ -4352,7 +4352,7 @@ def setup_email_routes():
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         body_hash, owner, target_language, data.get("uid", ""), data.get("folder", ""),
-                        subject, sender, "", 1, model, datetime.utcnow().isoformat(),
+                        subject, sender, "", 1, model, datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
                     ))
                     _c.commit()
                     _c.close()
@@ -4376,7 +4376,7 @@ def setup_email_routes():
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     body_hash, owner, target_language, data.get("uid", ""), data.get("folder", ""),
-                    subject, sender, content, 0, model, datetime.utcnow().isoformat(),
+                    subject, sender, content, 0, model, datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
                 ))
                 _c.commit()
                 _c.close()
@@ -4668,7 +4668,7 @@ def setup_email_routes():
                         INSERT OR REPLACE INTO email_ai_replies
                         (message_id, owner, uid, folder, reply, model_used, created_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """, (message_id, owner, source_uid, source_folder, reply, model, datetime.utcnow().isoformat()))
+                    """, (message_id, owner, source_uid, source_folder, reply, model, datetime.now(timezone.utc).replace(tzinfo=None).isoformat()))
                     _c.commit()
                     _c.close()
                 except Exception as e:

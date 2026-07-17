@@ -9,18 +9,16 @@ This package contains only what's needed for:
 - Authentication
 """
 
-from src.llm_core import (
-    llm_call,
-    llm_call_async,
-    stream_llm,
-    list_model_ids,
-    normalize_model_id,
-    LLMConfig,
-)
 from .auth import AuthManager
 from .constants import *
-from .middleware import SecurityHeadersMiddleware
+from .middleware import (
+    SecurityHeadersMiddleware,
+    RequestTimeoutMiddleware,
+    InteractiveActivityMiddleware,
+    SlowRequestLogMiddleware,
+)
 from .exceptions import (
+    AppError,
     SessionNotFoundError,
     InvalidFileUploadError,
     LLMServiceError,
@@ -30,18 +28,15 @@ from .models import Session, ChatMessage
 from .session_manager import SessionManager
 
 __all__ = [
-    # LLM
-    "llm_call",
-    "llm_call_async",
-    "stream_llm",
-    "list_model_ids",
-    "normalize_model_id",
-    "LLMConfig",
     # Auth
     "AuthManager",
     # Middleware
     "SecurityHeadersMiddleware",
+    "RequestTimeoutMiddleware",
+    "InteractiveActivityMiddleware",
+    "SlowRequestLogMiddleware",
     # Exceptions
+    "AppError",
     "SessionNotFoundError",
     "InvalidFileUploadError",
     "LLMServiceError",

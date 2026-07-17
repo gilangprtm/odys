@@ -1,0 +1,1406 @@
+"""Execution methods for scheduled tasks — agent loops, actions, research, delivery."""
+import asyncio
+import json
+import logging
+import re
+import time
+import uuid
+from datetime import datetime, timedelta
+from typing import Dict
+
+from core.auth import RESERVED_USERNAMES
+from src.task_action_policy import (
+    is_admin_only_task_action,
+    owner_has_admin_task_privileges,
+)
+
+from .helpers import (
+    _utcnow,
+    _cached,
+    _normalize_chat_endpoint,
+    _resolve_task_timezone,
+    _digest_windows,
+    _checkin_calendar_events,
+    compose_task_relevant_tools,
+    HOUSEKEEPING_DEFAULTS,
+    RETIRED_HOUSEKEEPING_ACTIONS,
+    compute_next_run,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class TaskSchedulerExecutionMixin:
+    """Mixin providing execution, delivery, and defaults methods for TaskScheduler.
+
+    Relies on instance attributes set by TaskScheduler.__init__:
+      _session_manager, _executing, _executing_lock, _task_handles,
+      _run_semaphore, _task_defer_counts, _pending_notifications,
+      _last_run_model, _running
+    """
+
+    # ── Built-in housekeeping actions whose output is pure infra ──────────
+    _SILENT_ACTIONS = frozenset({
+        "check_email_urgency",
+        "learn_sender_signatures",
+        "summarize_emails",
+        "draft_email_replies",
+        "email_auto_translate",
+        "extract_email_events",
+        "classify_events",
+        "tidy_sessions",
+        "tidy_documents",
+        "consolidate_memory",
+        "tidy_research",
+        "test_skills",
+        "audit_skills",
+    })
+
+    _MODEL_BACKED_ACTIONS = frozenset({
+        "summarize_emails",
+        "draft_email_replies",
+        "email_auto_translate",
+        "extract_email_events",
+        "classify_events",
+        "learn_sender_signatures",
+        "check_email_urgency",
+        "test_skills",
+        "audit_skills",
+        "consolidate_memory",
+    })
+
+    # ── Check-in source discovery ─────────────────────────────────────────
+    CHECKIN_MCP_PATTERNS = [
+        {"detect": "list_emails",   "section": "Email",    "tool": "list_emails",
+         "args": {"mailbox": "INBOX", "limit": 10, "unread_only": True},
+         "label_from_identity": True,
+         "formatter": "_format_email_output"},
+        {"detect": "search_emails", "section": "Email",    "tool": "search_emails",
+         "args": {"query": "is:unread", "limit": 10},
+         "label_from_identity": True,
+         "formatter": "_format_email_output"},
+        {"detect": "get_feed",      "section": "RSS",      "tool": "get_feed",
+         "args": {},
+         "label_from_identity": False},
+        {"detect": "list_feeds",    "section": "RSS",      "tool": "list_feeds",
+         "args": {},
+         "label_from_identity": False},
+        {"detect": "list_messages", "section": "Messages", "tool": "list_messages",
+         "args": {"limit": 10},
+         "label_from_identity": True},
+    ]
+
+    def _task_needs_model_slot(self, task_id: str) -> bool:
+        """Only LLM/research/model-backed actions should wait in the model
+        queue. Pure housekeeping actions can run immediately."""
+        from core.database import SessionLocal, ScheduledTask
+
+        db = SessionLocal()
+        try:
+            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+            if not task:
+                return True
+            task_type = getattr(task, "task_type", "") or "llm"
+            if task_type != "action":
+                return True
+            return (getattr(task, "action", "") or "") in self._MODEL_BACKED_ACTIONS
+        finally:
+            db.close()
+
+    def _log_to_assistant(self, db, task, result_text: str):
+        """Log a task result to the assistant's chat session."""
+        # Don't double-log check-ins (they already save directly)
+        if "check-in" in (task.name or "").lower():
+            return
+        # Built-in housekeeping noise stays out of the chat.
+        if (getattr(task, "action", "") or "") in self._SILENT_ACTIONS:
+            return
+        from src.assistant_log import log_to_assistant
+        log_to_assistant(
+            task.owner,
+            result_text[:1000],
+            category=(task.name or "Task"),
+        )
+
+    async def _execute_action(self, task, run_id: str | None = None) -> tuple:
+        """Execute a built-in action (no LLM needed)."""
+        from src.builtin_actions import BUILTIN_ACTIONS
+
+        action_fn = BUILTIN_ACTIONS.get(task.action)
+        if not action_fn:
+            return f"Unknown action: {task.action}", False
+
+        from src.builtin_actions import TaskNoop
+        try:
+            # Pass task prompt as script/command for ssh_command/run_script actions.
+            def _progress(message: str):
+                self._set_run_progress(run_id, message)
+
+            kwargs = {"owner": task.owner, "task_name": task.name, "progress_cb": _progress}
+            if task.prompt:
+                kwargs["prompt"] = task.prompt
+            if task.action in ("run_script", "run_local", "ssh_command") and task.prompt:
+                kwargs["script" if task.action in ("run_script", "run_local") else "command"] = task.prompt
+            # cookbook_serve carries its JSON config in task.prompt — feed it
+            # through as `command` so action_cookbook_serve can json.loads it.
+            elif task.action == "cookbook_serve" and task.prompt:
+                kwargs["command"] = task.prompt
+            result, success = await action_fn(**kwargs)
+            return result, success
+        except TaskNoop:
+            # Bubble up so _execute_task_locked can drop the run row silently.
+            raise
+        except Exception as e:
+            logger.error(f"Action '{task.action}' failed: {e}")
+            return str(e), False
+
+    @staticmethod
+    def _format_email_output(raw: str) -> str:
+        """Clean up raw MCP email list output into readable format."""
+        import re as _re
+        lines = []
+        for line in raw.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            # Skip header lines like "📬 [INBOX] 856 emails..."
+            if line.startswith(("\U0001f4ec", "📬", "No emails", "---", "Page ")):
+                continue
+            # Skip "more pages available" etc
+            if "page" in line.lower() and "/" in line:
+                continue
+            # Parse: [1778] Re: Subject From: Name | Date
+            m = _re.match(r'\[?\d+\]?\s*(?:↩️\s*|📎\s*|🔵\s*|⭐\s*)?(.+?)(?:\s*From:\s*(.+?))?(?:\s*\|\s*(\S+))?$', line)
+            if m:
+                subject = m.group(1).strip().rstrip('|').strip()
+                sender = (m.group(2) or "").strip().rstrip('|').strip()
+                if sender:
+                    lines.append(f"- {sender} — {subject}")
+                else:
+                    lines.append(f"- {subject}")
+            elif line.startswith("[") or line.startswith("-"):
+                # Generic cleanup
+                cleaned = _re.sub(r'^\[\d+\]\s*(?:↩️\s*|📎\s*)?', '', line.lstrip('- '))
+                if cleaned.strip():
+                    lines.append(f"- {cleaned.strip()}")
+        if not lines:
+            return "No unread emails"
+        return "\n".join(lines[:10])
+
+    async def _execute_checkin(self, task, crew, db, session_id: str,
+                               endpoint_url: str, model: str) -> str:
+        """Gather raw data from all integrations, hand it to the LLM to write the check-in."""
+        from src.tool_implementations import do_manage_notes
+        from src.tool_utils import get_mcp_manager
+
+        tz_name = _resolve_task_timezone(db, task)
+        try:
+            if tz_name:
+                from zoneinfo import ZoneInfo
+                from datetime import timezone, timedelta
+                now = _utcnow().replace(tzinfo=timezone.utc).astimezone(ZoneInfo(tz_name))
+            else:
+                from datetime import timedelta
+                now = _utcnow()
+            time_str = now.strftime("%A, %B %d %Y, %H:%M")
+        except Exception:
+            from datetime import timedelta
+            now = _utcnow()
+            time_str = now.strftime("%H:%M UTC")
+
+        raw = {}
+
+        # Calendar: today+tomorrow, this week, month ahead
+        # Pull directly from DB so we can include event_type and importance.
+        try:
+            from core.database import SessionLocal as _SL, CalendarEvent as _CE
+            _db = _SL()
+            try:
+                for label, start, end in _digest_windows(now):
+                    # Strip timezone for naive DB comparison
+                    _s = start.replace(tzinfo=None) if start.tzinfo else start
+                    _e = end.replace(tzinfo=None) if end.tzinfo else end
+                    evs = _checkin_calendar_events(_db, task.owner, _s, _e)
+                    if not evs:
+                        continue
+                    # Group by importance for richer output
+                    by_imp = {"critical": [], "high": [], "normal": [], "low": []}
+                    for ev in evs:
+                        imp = (ev.importance or "normal").lower()
+                        by_imp.setdefault(imp, []).append(ev)
+                    lines = []
+                    for tier in ("critical", "high", "normal", "low"):
+                        items = by_imp.get(tier, [])
+                        if not items:
+                            continue
+                        marker = {"critical": "[!!]", "high": "[!]", "normal": "  ", "low": " ·"}[tier]
+                        for ev in items:
+                            t = ev.dtstart.strftime("%a %b %d %H:%M")
+                            tag = f" ({ev.event_type})" if ev.event_type else ""
+                            loc = f" @ {ev.location}" if ev.location else ""
+                            lines.append(f"{marker} {t} — {ev.summary}{tag}{loc}")
+                    if lines:
+                        raw[f"calendar_{label}"] = "\n".join(lines)
+            finally:
+                _db.close()
+        except Exception as e:
+            raw["calendar"] = f"Error: {e}"
+
+        # Notes/Tasks
+        try:
+            r = await do_manage_notes(json.dumps({"action": "list"}), owner=task.owner)
+            raw["notes_tasks"] = r.get("results") or r.get("response") or "No notes"
+        except Exception as e:
+            raw["notes_tasks"] = f"Error: {e}"
+
+        # Auto-discover API integrations (Miniflux RSS, etc.).
+        try:
+            import httpx
+            from src.integrations import load_integrations
+            for integ in load_integrations():
+                if not integ.get("enabled"):
+                    continue
+                preset = integ.get("preset", "")
+                base_url = integ.get("base_url", "").rstrip("/")
+                api_key = integ.get("api_key", "")
+                if not base_url:
+                    continue
+
+                # Build auth headers
+                headers = {}
+                if integ.get("auth_type") == "header" and api_key:
+                    headers[integ.get("auth_header", "X-Auth-Token")] = api_key
+                elif integ.get("auth_type") == "bearer" and api_key:
+                    headers["Authorization"] = f"Bearer {api_key}"
+
+                # Miniflux: fetch unread entries (cached 3 min across tasks)
+                if preset == "miniflux":
+                    async def _fetch_miniflux(_base=base_url, _headers=dict(headers)):
+                        async with httpx.AsyncClient(timeout=10) as client:
+                            resp = await client.get(
+                                f"{_base}/v1/entries",
+                                params={"status": "unread", "limit": 15, "order": "published_at", "direction": "desc"},
+                                headers=_headers,
+                            )
+                            if resp.status_code != 200:
+                                return None
+                            entries = resp.json().get("entries", []) or []
+                            if not entries:
+                                return None
+                            lines = []
+                            for e in entries[:15]:
+                                title = e.get("title", "?")
+                                feed = (e.get("feed") or {}).get("title", "?")
+                                url = e.get("url", "")
+                                lines.append(f"- [{feed}] {title} — {url}")
+                            return "\n".join(lines)
+                    try:
+                        val = await _cached(("miniflux_unread", base_url), 180, _fetch_miniflux)
+                        if val:
+                            raw["rss_miniflux_unread"] = val
+                    except Exception as e:
+                        logger.warning(f"Miniflux fetch failed: {e}")
+        except Exception as e:
+            logger.warning(f"Integrations discovery failed: {e}")
+
+        # Auto-discover MCP sources
+        mcp = get_mcp_manager()
+        if mcp:
+            discovered = set()
+            for server_id, tools in mcp._tools.items():
+                if mcp.is_builtin(server_id):
+                    continue
+                conn = mcp._connections.get(server_id, {})
+                if conn.get("status") != "connected":
+                    continue
+                identity = conn.get("identity", "")
+                tool_names = {t["name"] for t in tools}
+                for pattern in self.CHECKIN_MCP_PATTERNS:
+                    if pattern["detect"] not in tool_names:
+                        continue
+                    key = f"{pattern['section']}_{server_id}"
+                    if key in discovered:
+                        continue
+                    discovered.add(key)
+                    label = f"{pattern['section']} ({identity})" if identity else pattern["section"]
+                    qualified = f"mcp__{server_id}__{pattern['tool']}"
+                    args = dict(pattern.get("args", {}))
+                    args["account"] = "default"
+                    try:
+                        # Cache 3 min: different scheduled tasks firing at the
+                        # same minute share the same MCP snapshot.
+                        async def _call_mcp(_q=qualified, _args=args):
+                            return await mcp.call_tool(_q, _args)
+                        cache_key = ("mcp_snapshot", qualified, json.dumps(args, sort_keys=True))
+                        result = await _cached(cache_key, 180, _call_mcp)
+                        if result.get("exit_code", 0) != 0:
+                            continue
+                        content = result.get("stdout") or result.get("output") or ""
+                        if content.strip():
+                            raw[label] = content[:3000]
+                    except Exception:
+                        pass
+
+        # Build the data dump and hand it to the LLM
+        data_dump = f"Current time: {time_str}\n\n"
+        for key, val in raw.items():
+            data_dump += f"--- {key} ---\n{val}\n\n"
+
+        context = (
+            data_dump +
+            f"---\n\n{task.prompt}\n\n"
+            "Write the check-in. YOU decide what matters, what to skip, how to format. "
+            "Only show future events. Calendar events are pre-tagged with importance: "
+            "[!!] critical, [!] high, plain = normal, ' ·' = low. "
+            "GROUP your output by importance — lead with critical/high, then normal, "
+            "skip low entirely unless explicitly relevant. Mention event type (work/health/travel/etc) "
+            "where it adds context (e.g. 'leave 1h early for travel'). "
+            "Flag anything coming up that needs prep (birthdays, deadlines, holidays). "
+            "Use tools to take action if needed. Keep it concise — no raw data dumps."
+        )
+
+        return await self._run_agent_loop(
+            endpoint_url, model, task, session_id,
+            system_prompt=(crew.personality or "").strip() if crew else None,
+            disabled_tools=None, relevant_tools=None,
+            override_user_message=context,
+        )
+
+    async def _execute_llm_task(self, task, db) -> str:
+        """Execute an LLM task with full tool access via the agent loop."""
+        from core.database import Session as DbSession, ChatMessage, CrewMember
+
+        # If this task is wired to a CrewMember (personal assistant, custom
+        # crew), prefer the crew member's persona/model/endpoint as overrides.
+        crew = None
+        if getattr(task, "crew_member_id", None):
+            try:
+                crew = db.query(CrewMember).filter(CrewMember.id == task.crew_member_id).first()
+            except Exception:
+                crew = None
+
+        # Determine endpoint + model
+        endpoint_url = task.endpoint_url
+        model = task.model
+        if (not endpoint_url or not model) and crew:
+            endpoint_url = endpoint_url or crew.endpoint_url
+            model = model or crew.model
+        if not endpoint_url or not model:
+            endpoint_url, model = self._resolve_defaults(db, task.owner)
+        if not endpoint_url or not model:
+            raise RuntimeError("No model/endpoint configured")
+        endpoint_url = _normalize_chat_endpoint(endpoint_url)
+        # Record the resolved model so _execute_task_locked can persist it on
+        # the run (tasks rarely pin a model, so this is the only record of
+        # which model actually produced the output).
+        self._last_run_model = model
+
+        # Ensure a session exists for output
+        session_id = task.session_id
+        if not session_id:
+            session_id = str(uuid.uuid4())
+            sess = DbSession(
+                id=session_id,
+                name=f"[Task] {task.name}",
+                endpoint_url=endpoint_url,
+                model=model,
+                owner=task.owner,
+                folder="Tasks",
+                created_at=_utcnow(),
+                updated_at=_utcnow(),
+            )
+            db.add(sess)
+            task.session_id = session_id
+            db.commit()
+            if self._session_manager:
+                try:
+                    self._session_manager.ensure_task_session(
+                        session_id, f"[Task] {task.name}", endpoint_url, model,
+                        owner=task.owner, task=task
+                    )
+                except Exception:
+                    pass
+
+        # For assistant check-ins: call each tool directly and post results
+        # as separate messages. More reliable than hoping the model calls tools.
+        is_checkin = crew and crew.is_default_assistant and "check-in" in (task.name or "").lower()
+        if is_checkin:
+            return await self._execute_checkin(task, crew, db, session_id, endpoint_url, model)
+
+        # Build system prompt: crew member persona overrides the default.
+        system_prompt = (
+            (crew.personality or "").strip()
+            if crew and crew.personality
+            else "You are a helpful assistant executing a scheduled task. Use available tools to complete the task thoroughly."
+        )
+        char_id = (getattr(task, "character_id", None) or "").strip()
+        if char_id:
+            try:
+                from src.reminder_personas import PERSONAS as _PERSONAS
+                char_prompt = _PERSONAS.get(char_id.lower())
+                if char_prompt:
+                    system_prompt = f"{char_prompt}\n\n{system_prompt}"
+            except Exception:
+                pass
+        # Provide current date/time as a user-role message so the system prompt
+        # stays byte-identical across runs and doesn't bust the Anthropic prompt
+        # cache on every scheduled tick.
+        tz_name = _resolve_task_timezone(db, task)
+        try:
+            from src.user_time import current_datetime_context_message_for_tz
+            _dt_msg: dict | None = current_datetime_context_message_for_tz(tz_name)
+        except Exception:
+            _dt_msg = None
+
+        # Compute the disabled-tools set
+        disabled_tools: set[str] = set()
+        if crew and crew.enabled_tools:
+            try:
+                enabled = json.loads(crew.enabled_tools)
+                if isinstance(enabled, list) and enabled:
+                    from src.tool_index import BUILTIN_TOOL_DESCRIPTIONS
+                    all_tools = set(BUILTIN_TOOL_DESCRIPTIONS.keys())
+                    disabled_tools |= all_tools - set(enabled)
+            except Exception:
+                pass
+        try:
+            from src.settings import get_setting
+            _global_disabled = get_setting("disabled_tools", [])
+            if isinstance(_global_disabled, list):
+                disabled_tools.update(_global_disabled)
+        except Exception:
+            pass
+
+        # RAG-select relevant tools for this prompt
+        relevant_tools = None
+        try:
+            from src.tool_index import get_tool_index, ASSISTANT_ALWAYS_AVAILABLE
+            tool_idx = get_tool_index()
+            if tool_idx:
+                rag_tools = tool_idx.get_tools_for_query(task.prompt or "", k=8)
+                relevant_tools = compose_task_relevant_tools(
+                    rag_tools, ASSISTANT_ALWAYS_AVAILABLE, disabled_tools
+                )
+                logger.info(f"[assistant] RAG selected {len(rag_tools)} tools + {len(ASSISTANT_ALWAYS_AVAILABLE)} always-available + shell/file defaults = {len(relevant_tools)} total for '{task.name}'")
+        except Exception as e:
+            logger.warning(f"[assistant] RAG tool selection failed, using all: {e}")
+
+        # Try using the agent loop for full tool access
+        try:
+            result = await self._run_agent_loop(
+                endpoint_url, model, task, session_id,
+                system_prompt=system_prompt, disabled_tools=disabled_tools or None,
+                relevant_tools=relevant_tools,
+                datetime_context_msg=_dt_msg,
+            )
+        except Exception as e:
+            logger.warning(f"Agent loop failed for task '{task.name}', falling back to simple call: {e}")
+            from src.task_endpoint import task_llm_call_async
+            messages: list = [{"role": "system", "content": system_prompt}]
+            if _dt_msg:
+                messages.append(_dt_msg)
+            messages.append({"role": "user", "content": task.prompt})
+            result = await task_llm_call_async(
+                messages,
+                fallback_url=endpoint_url,
+                fallback_model=model,
+                owner=task.owner,
+                timeout=120,
+            )
+
+        # Strip the model's chain-of-thought before saving/delivering.
+        try:
+            from src.text_helpers import strip_think
+            result = strip_think(result or "", prose=True, prompt_echo=True).strip() or result
+        except Exception:
+            pass
+
+        return result
+
+    async def _deliver_task_result(self, task, result: str, db, model: str = None):
+        """Deliver a completed task result according to output_target."""
+        from core.database import Session as DbSession, ChatMessage, CrewMember
+        from core.models import ChatMessage as MemChatMessage
+
+        output = task.output_target or "session"
+        if (
+            output == "session"
+            and (getattr(task, "task_type", "") or "") == "action"
+            and (getattr(task, "action", "") or "") in self._SILENT_ACTIONS
+        ):
+            return
+        if output.startswith("mcp__"):
+            await self._deliver_via_mcp(output, task, result)
+            return
+
+        if self._is_email_output_target(output):
+            await self._deliver_via_email(output, task, result)
+            return
+
+        if output != "session":
+            return
+
+        endpoint_url = task.endpoint_url
+        model_name = model or task.model
+        crew = None
+        if getattr(task, "crew_member_id", None):
+            try:
+                crew = db.query(CrewMember).filter(CrewMember.id == task.crew_member_id).first()
+            except Exception:
+                crew = None
+        if (not endpoint_url or not model_name) and crew:
+            endpoint_url = endpoint_url or crew.endpoint_url
+            model_name = model_name or crew.model
+        if not endpoint_url or not model_name:
+            try:
+                resolved_url, resolved_model = self._resolve_defaults(db, task.owner)
+                endpoint_url = endpoint_url or resolved_url
+                model_name = model_name or resolved_model
+            except Exception:
+                pass
+
+        endpoint_url = _normalize_chat_endpoint(endpoint_url)
+
+        session_id = task.session_id
+        if not session_id:
+            session_id = str(uuid.uuid4())
+            sess = DbSession(
+                id=session_id,
+                name=f"[Task] {task.name}",
+                endpoint_url=endpoint_url or "",
+                model=model_name or "",
+                owner=task.owner,
+                folder="Tasks",
+                created_at=_utcnow(),
+                updated_at=_utcnow(),
+            )
+            db.add(sess)
+            task.session_id = session_id
+            db.commit()
+            if self._session_manager:
+                try:
+                    self._session_manager.ensure_task_session(
+                        session_id, f"[Task] {task.name}", endpoint_url, model_name,
+                        owner=task.owner, task=task
+                    )
+                except Exception:
+                    pass
+
+        meta = {}
+        if model_name:
+            meta["model"] = model_name
+        if crew and crew.is_default_assistant:
+            meta.update({"source": "cron", "task_id": task.id, "task_name": task.name})
+
+        # Use SessionManager for persistence so in-memory cache stays in sync
+        if self._session_manager and session_id:
+            try:
+                self._session_manager.add_message(
+                    session_id,
+                    MemChatMessage(
+                        "user",
+                        task.prompt or f"[Task] {task.name}",
+                        metadata=dict(meta),
+                    ),
+                )
+                self._session_manager.add_message(
+                    session_id,
+                    MemChatMessage(
+                        "assistant",
+                        result or "",
+                        metadata=dict(meta),
+                    ),
+                )
+            except Exception:
+                logger.exception("Failed to deliver task %s through SessionManager", task.id)
+        else:
+            # Fallback: raw DB write (no session manager available)
+            msg_meta = json.dumps(meta)
+            user_msg = ChatMessage(
+                id=str(uuid.uuid4()),
+                session_id=session_id,
+                role="user",
+                content=task.prompt or f"[Task] {task.name}",
+                timestamp=_utcnow(),
+                meta_data=msg_meta,
+            )
+            assistant_msg = ChatMessage(
+                id=str(uuid.uuid4()),
+                session_id=session_id,
+                role="assistant",
+                content=result or "",
+                timestamp=_utcnow(),
+                meta_data=msg_meta,
+            )
+            db.add(user_msg)
+            db.add(assistant_msg)
+            db.commit()
+
+    @staticmethod
+    def _is_email_output_target(output: str) -> bool:
+        target = (output or "").strip()
+        if target in {"email", "email:self"}:
+            return True
+        if target.startswith("email:"):
+            return True
+        return bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", target))
+
+    async def _deliver_via_email(self, output: str, task, result: str):
+        """Send task output through the app's configured SMTP account."""
+        from email.message import EmailMessage
+
+        target = (output or "").strip()
+        explicit = ""
+        account_id = ""
+        if target.startswith("email:"):
+            explicit = target.split(":", 1)[1].strip()
+            if "|account=" in explicit:
+                explicit, account_id = explicit.split("|account=", 1)
+                explicit = explicit.strip()
+                account_id = account_id.strip()
+            if explicit == "self":
+                explicit = ""
+        elif "@" in target:
+            explicit = target
+
+        try:
+            from routes.email_routes import _resolve_send_config
+            from routes.email_helpers import _send_smtp_message
+
+            cfg = _resolve_send_config(account_id=account_id or None, owner=task.owner or "")
+            to_addr = explicit or cfg.get("from_address") or cfg.get("smtp_user") or ""
+            if not to_addr:
+                raise RuntimeError("No email recipient resolved for task output")
+
+            from_addr = cfg.get("from_address") or cfg.get("smtp_user") or to_addr
+            msg = EmailMessage()
+            msg["From"] = from_addr
+            msg["To"] = to_addr
+            msg["Subject"] = f"[Task] {task.name}"
+            msg["X-Odysseus-Origin"] = "odysseus-ui"
+            msg["X-Odysseus-Kind"] = "task"
+            msg["X-Odysseus-Ref"] = str(task.id)
+            msg.set_content(result or "")
+            _send_smtp_message(cfg, from_addr, [to_addr], msg.as_string(), timeout=30)
+            logger.info("Task %s emailed result (recipient_set=%s, %sb)", task.id, bool(to_addr), len(result or ""))
+        except Exception as e:
+            logger.error("Task %s email delivery failed: %s", task.id, e, exc_info=True)
+            raise
+
+    async def _run_agent_loop(self, endpoint_url: str, model: str, task, session_id: str,
+                              system_prompt: str | None = None,
+                              disabled_tools: set | None = None,
+                              relevant_tools: set | None = None,
+                              override_user_message: str | None = None,
+                              datetime_context_msg: dict | None = None) -> str:
+        """Run the full agent loop with tool access, collecting the final text."""
+        from src.agent_loop import stream_agent_loop
+
+        system_content = system_prompt or "You are a helpful assistant executing a scheduled task. Use available tools to complete the task thoroughly."
+        user_content = override_user_message or task.prompt
+        messages: list = [{"role": "system", "content": system_content}]
+        if datetime_context_msg:
+            messages.append(datetime_context_msg)
+        messages.append({"role": "user", "content": user_content})
+
+        # Resolve headers from the endpoint's API key
+        headers = {}
+        try:
+            from core.database import SessionLocal, ModelEndpoint
+            from src.endpoint_resolver import normalize_base, build_headers
+            from src.auth_helpers import owner_filter
+            db2 = SessionLocal()
+            try:
+                ep_q = db2.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
+                ep_q = owner_filter(ep_q, ModelEndpoint, task.owner or None)
+                eps = ep_q.all()
+                for ep in eps:
+                    if normalize_base(ep.base_url) in endpoint_url or endpoint_url in normalize_base(ep.base_url):
+                        headers = build_headers(ep.api_key, normalize_base(ep.base_url))
+                        break
+            finally:
+                db2.close()
+        except Exception:
+            pass
+        full_text = ""
+        tool_results = []
+
+        _task_max_rounds = task.max_steps if task.max_steps and task.max_steps > 0 else 20
+        try:
+            from src.interactive_gate import wait_for_interactive_quiet
+            await wait_for_interactive_quiet(f"agent task {task.name}")
+            from src.task_endpoint import resolve_task_candidates
+            _task_fallbacks = resolve_task_candidates(
+                fallback_url=endpoint_url,
+                fallback_model=model,
+                fallback_headers=headers,
+                owner=task.owner or None,
+            )[1:]
+        except Exception:
+            _task_fallbacks = []
+        async for event_str in stream_agent_loop(
+            endpoint_url=endpoint_url,
+            model=model,
+            messages=messages,
+            max_rounds=_task_max_rounds,
+            session_id=session_id,
+            owner=task.owner,
+            headers=headers,
+            disabled_tools=disabled_tools,
+            relevant_tools=relevant_tools,
+            fallbacks=_task_fallbacks,
+            workload="background",
+        ):
+            if event_str.startswith("data: ") and not event_str.startswith("data: [DONE]"):
+                try:
+                    data = json.loads(event_str[6:])
+                    if "delta" in data:
+                        if data.get("thinking"):
+                            continue
+                        full_text += data["delta"]
+                    elif data.get("type") == "tool_output":
+                        tool_summary = data.get("stdout") or data.get("output") or data.get("result") or ""
+                        if isinstance(tool_summary, str) and tool_summary.strip():
+                            tool_results.append(f"[{data.get('tool', '?')}] {tool_summary[:500]}")
+                except (json.JSONDecodeError, KeyError):
+                    pass
+
+        # Grace summarization
+        if not full_text.strip():
+            try:
+                from src.task_endpoint import task_llm_call_async
+                grace_context = "You ran out of steps. "
+                if tool_results:
+                    grace_context += "Here's what your tools returned:\n" + "\n".join(tool_results[-5:])
+                else:
+                    grace_context += "No tool results were captured."
+                grace_context += "\n\nSummarize what you accomplished and what's still pending. Be concise."
+                full_text = await task_llm_call_async(
+                    messages=[
+                        {"role": "system", "content": system_content},
+                        {"role": "user", "content": grace_context},
+                    ],
+                    fallback_url=endpoint_url,
+                    fallback_model=model,
+                    fallback_headers=headers,
+                    owner=task.owner or None,
+                    timeout=30,
+                )
+                full_text = (full_text or "").strip()
+            except Exception as e:
+                logger.warning(f"Grace summarization failed: {e}")
+                if tool_results:
+                    full_text = "\n".join(tool_results[-5:])
+
+        return full_text or "(no output)"
+
+    async def _execute_research_task(self, task, db) -> str:
+        """Execute a deep research task using DeepResearcher."""
+        from core.database import Session as DbSession, ChatMessage
+        from src.deep_research import DeepResearcher
+        from src.research_handler import RESEARCH_DATA_DIR, ResearchHandler
+        from src.research_utils import strip_thinking
+        from src.settings import get_setting
+
+        # Resolve endpoint/model
+        endpoint_url = task.endpoint_url
+        model = task.model
+        headers = {}
+        headers_from_resolver = False
+
+        if not endpoint_url or not model:
+            try:
+                from src.endpoint_resolver import resolve_endpoint
+                ep_url, ep_model, ep_headers = resolve_endpoint(
+                    "research",
+                    endpoint_url or None,
+                    model or None,
+                    None,
+                    owner=task.owner or None,
+                )
+                endpoint_url = ep_url or endpoint_url
+                model = ep_model or model
+                if ep_headers is not None:
+                    headers = ep_headers
+                    headers_from_resolver = True
+            except Exception:
+                pass
+
+        if not endpoint_url or not model:
+            endpoint_url, model = self._resolve_defaults(db, task.owner)
+        if not endpoint_url or not model:
+            raise RuntimeError("No model/endpoint configured for research")
+        endpoint_url = _normalize_chat_endpoint(endpoint_url)
+        self._last_run_model = model
+
+        # Resolve headers
+        try:
+            from core.database import ModelEndpoint
+            from src.endpoint_resolver import normalize_base, build_headers
+            from src.auth_helpers import owner_filter
+            db2 = db
+            if not headers_from_resolver:
+                ep_q = db2.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
+                ep_q = owner_filter(ep_q, ModelEndpoint, task.owner or None)
+                eps = ep_q.all()
+                for ep in eps:
+                    if normalize_base(ep.base_url) in endpoint_url or endpoint_url in normalize_base(ep.base_url):
+                        headers = build_headers(ep.api_key, normalize_base(ep.base_url))
+                        break
+        except Exception:
+            pass
+
+        max_tokens = int(get_setting("research_max_tokens", 8192))
+        extraction_timeout = int(get_setting("research_extraction_timeout_seconds", 90) or 90)
+        extraction_concurrency = int(get_setting("research_extraction_concurrency", 3) or 3)
+
+        researcher = DeepResearcher(
+            llm_endpoint=endpoint_url,
+            llm_model=model,
+            llm_headers=headers,
+            max_rounds=8,
+            max_time=600,
+            max_report_tokens=max_tokens,
+            extraction_timeout=extraction_timeout,
+            extraction_concurrency=extraction_concurrency,
+        )
+
+        started_ts = time.time()
+        report = await researcher.research(task.prompt)
+        completed_ts = time.time()
+        try:
+            stats = researcher.get_stats() or {}
+        except Exception:
+            stats = {}
+
+        # Ensure a session exists for output
+        session_id = task.session_id
+        if not session_id:
+            session_id = str(uuid.uuid4())
+            sess = DbSession(
+                id=session_id,
+                name=f"[Research] {task.name}",
+                endpoint_url=endpoint_url,
+                model=model,
+                owner=task.owner,
+                folder="Tasks",
+                created_at=_utcnow(),
+                updated_at=_utcnow(),
+            )
+            db.add(sess)
+            task.session_id = session_id
+            db.commit()
+            if self._session_manager:
+                try:
+                    self._session_manager.sessions[session_id] = self._session_manager._db_to_session(sess)
+                except Exception:
+                    pass
+
+        # Persist scheduled research in the same shape used by the Research panel
+        try:
+            RESEARCH_DATA_DIR.mkdir(parents=True, exist_ok=True)
+            findings = getattr(researcher, "findings", []) or []
+            payload = {
+                "query": task.prompt or task.name or "Scheduled research",
+                "status": "done",
+                "result": report,
+                "raw_report": strip_thinking(report or ""),
+                "sources": ResearchHandler._extract_sources(findings),
+                "raw_findings": ResearchHandler._extract_raw_findings(findings),
+                "stats": stats,
+                "category": "scheduled",
+                "started_at": started_ts,
+                "completed_at": completed_ts,
+                "owner": task.owner or "",
+                "task_id": task.id,
+                "task_name": task.name,
+            }
+            (RESEARCH_DATA_DIR / f"{session_id}.json").write_text(json.dumps(payload), encoding="utf-8")
+            try:
+                from src.event_bus import fire_event
+                fire_event("research_completed", task.owner or None)
+            except Exception:
+                logger.debug("research_completed event dispatch failed", exc_info=True)
+        except Exception as e:
+            logger.warning("Failed to persist task research report %s: %s", session_id, e)
+
+        return report
+
+    async def _run_chained(self, task_id: str):
+        """Run a chained task with _executing membership."""
+        async with self._executing_lock:
+            if task_id in self._executing:
+                return
+            self._executing.add(task_id)
+        await self._execute_task(task_id)
+
+    def _has_chain_cycle(self, db, start_id: str, max_depth: int = 10, owner: str | None = None) -> bool:
+        """Detect cycles in task chains."""
+        from core.database import ScheduledTask
+        visited = set()
+        current = start_id
+        for _ in range(max_depth):
+            if current in visited:
+                return True
+            visited.add(current)
+            task = db.query(ScheduledTask).filter(ScheduledTask.id == current).first()
+            if owner is not None and task and task.owner != owner:
+                return True
+            if not task or not task.then_task_id:
+                return False
+            current = task.then_task_id
+        return True  # too deep, treat as cycle
+
+    def _resolve_defaults(self, db, owner):
+        """Find the first available endpoint + model from an existing session."""
+        from core.database import Session as DbSession
+        try:
+            recent = db.query(DbSession).filter(
+                DbSession.endpoint_url.isnot(None),
+                DbSession.model.isnot(None),
+                *([DbSession.owner == owner] if owner else []),
+            ).order_by(DbSession.created_at.desc()).first()
+            if recent:
+                return recent.endpoint_url, recent.model
+        except Exception:
+            pass
+        return None, None
+
+    async def _deliver_via_mcp(self, tool_name: str, task, result: str):
+        """Send the task result via an MCP tool."""
+        from src.tool_utils import get_mcp_manager
+        mcp = get_mcp_manager()
+        if not mcp:
+            logger.warning(f"Task {task.id}: MCP manager not available for delivery")
+            return
+
+        recipient = None
+        try:
+            from routes.email_helpers import _get_email_config
+            cfg = _get_email_config() or {}
+            recipient = cfg.get("from_address") or None
+        except Exception as _e:
+            logger.debug(f"_deliver_via_mcp: email config lookup failed: {_e}")
+        if not recipient and task.owner and "@" in str(task.owner):
+            recipient = task.owner
+
+        args = {
+            "subject": f"[Task] {task.name}",
+            "body": result,
+            "headers": {
+                "X-Odysseus-Origin": "odysseus-ui",
+                "X-Odysseus-Kind": "task",
+                "X-Odysseus-Ref": str(task.id),
+            },
+        }
+        if recipient:
+            args["to"] = recipient
+            args["recipient"] = recipient
+            args["email"] = recipient
+            args["address"] = recipient
+        else:
+            logger.warning(
+                f"Task {task.id}: no recipient resolved for MCP delivery via {tool_name} — "
+                "set an email From address in Settings or give the task an owner email."
+            )
+        try:
+            mcp_result = await mcp.call_tool(tool_name, args)
+            stderr = mcp_result.get("stderr", "")
+            stdout = mcp_result.get("stdout", "")
+            body_len = len(result or "")
+            exit_code = mcp_result.get("exit_code", 0)
+            if exit_code != 0:
+                logger.warning(
+                    f"Task {task.id} MCP delivery FAILED via {tool_name}: "
+                    f"exit={exit_code} stderr={stderr[:400]!r} stdout={stdout[:400]!r}"
+                )
+            else:
+                logger.info(
+                    f"Task {task.id} delivered via MCP tool {tool_name} "
+                    f"(recipient_set={bool(recipient)}, body={body_len}b, reply={stdout[:200]!r})"
+                )
+        except Exception as e:
+            logger.error(f"Task {task.id} MCP delivery failed: {e}")
+
+    async def run_task_now(self, task_id: str, *, force: bool = False):
+        """Manually trigger a task execution."""
+        if force:
+            asyncio.create_task(self._execute_task(task_id, bypass_model_slot=True, release_executing=False))
+            return True
+        async with self._executing_lock:
+            if task_id in self._executing:
+                return False
+            self._executing.add(task_id)
+        asyncio.create_task(self._execute_task(task_id))
+        return True
+
+    async def stop_task(self, task_id: str) -> bool:
+        """Request cancellation of a running/queued task and mark its run aborted."""
+        handle = self._task_handles.get(task_id)
+        stopped = False
+        if handle and not handle.done():
+            handle.cancel()
+            stopped = True
+        async with self._executing_lock:
+            if task_id in self._executing:
+                self._executing.discard(task_id)
+                stopped = True
+
+        stopped = self._mark_run_aborted(task_id) or stopped
+        return stopped
+
+    async def stop_background_tasks_for_foreground(self, *, reason: str = "Odysseus became active") -> int:
+        """Cancel all in-process scheduler tasks because the user is active."""
+        async with self._executing_lock:
+            task_ids = list(self._executing)
+        stopped = 0
+        for task_id in task_ids:
+            handle = self._task_handles.get(task_id)
+            if handle and not handle.done():
+                handle.cancel()
+                stopped += 1
+            if self._mark_run_aborted(task_id):
+                stopped += 1
+        if stopped:
+            logger.info("Stopped %d background scheduler task(s): %s", stopped, reason)
+        return stopped
+
+    async def ensure_defaults(self, owner: str):
+        """Create default housekeeping tasks for this owner (idempotent per action)."""
+        from core.database import SessionLocal, ScheduledTask
+        try:
+            from routes.prefs_routes import _load_for_user
+            _prefs = _load_for_user(owner) or {}
+        except Exception:
+            _prefs = {}
+        tasks_enabled = bool(_prefs.get("tasks_enabled"))
+        tasks_opened = bool(_prefs.get("tasks_opened"))
+
+        db = SessionLocal()
+        try:
+            # Normalize old built-ins that were created before `task_type` /
+            # `action` were reliable.
+            name_to_action = {}
+            for action, defs in HOUSEKEEPING_DEFAULTS.items():
+                name_to_action[defs["name"]] = action
+                for legacy in defs.get("legacy_names") or []:
+                    name_to_action[legacy] = action
+            possible_names = list(name_to_action.keys())
+            legacy_named = db.query(ScheduledTask).filter(
+                ScheduledTask.owner == owner,
+                ScheduledTask.name.in_(possible_names),
+            ).all()
+            for task in legacy_named:
+                action = name_to_action.get(task.name)
+                if not action:
+                    continue
+                task.task_type = "action"
+                task.action = action
+
+            from core.database import TaskRun
+            retired_ids = [
+                row[0] for row in db.query(ScheduledTask.id).filter(
+                    ScheduledTask.owner == owner,
+                    ScheduledTask.task_type == "action",
+                    ScheduledTask.action.in_(list(RETIRED_HOUSEKEEPING_ACTIONS)),
+                ).all()
+            ]
+            if retired_ids:
+                db.query(TaskRun).filter(TaskRun.task_id.in_(retired_ids)).delete(synchronize_session=False)
+            retired_count = db.query(ScheduledTask).filter(
+                ScheduledTask.owner == owner,
+                ScheduledTask.task_type == "action",
+                ScheduledTask.action.in_(list(RETIRED_HOUSEKEEPING_ACTIONS)),
+            ).delete(synchronize_session=False)
+            # Sweep orphan TaskRun rows
+            try:
+                live_ids = {row[0] for row in db.query(ScheduledTask.id).all()}
+                if live_ids:
+                    db.query(TaskRun).filter(~TaskRun.task_id.in_(list(live_ids))).delete(synchronize_session=False)
+            except Exception:
+                pass
+            existing_actions = {
+                row[0] for row in db.query(ScheduledTask.action).filter(
+                    ScheduledTask.owner == owner,
+                    ScheduledTask.task_type == "action",
+                ).all() if row[0]
+            }
+            renamed = []
+            builtin_tasks = db.query(ScheduledTask).filter(
+                ScheduledTask.owner == owner,
+                ScheduledTask.task_type == "action",
+                ScheduledTask.action.in_(list(HOUSEKEEPING_DEFAULTS.keys())),
+            ).all()
+            by_action = {}
+            for task in builtin_tasks:
+                by_action.setdefault(task.action, []).append(task)
+            removed_dupes = []
+            kept_ids = set()
+            for action, tasks in by_action.items():
+                defs = HOUSEKEEPING_DEFAULTS.get(action)
+                if not defs:
+                    continue
+                desired_trigger = defs.get("trigger_type", "schedule")
+
+                def _score(candidate):
+                    matches_default = (
+                        (candidate.trigger_type or "schedule") == desired_trigger
+                        and (candidate.trigger_event or None) == defs.get("trigger_event")
+                        and (candidate.trigger_count or 1) == (defs.get("trigger_count") or 1)
+                        and (candidate.schedule or None) == defs.get("schedule")
+                        and (candidate.scheduled_time or None) == defs.get("scheduled_time")
+                        and (candidate.cron_expression or None) == defs.get("cron_expression")
+                    )
+                    created = candidate.created_at or datetime.min
+                    created_key = (created.toordinal(), created.hour, created.minute, created.second, created.microsecond)
+                    return (1 if matches_default else 0, 1 if candidate.status == "active" else 0, created_key)
+
+                keep = sorted(tasks, key=_score, reverse=True)[0]
+                kept_ids.add(keep.id)
+                for dupe in tasks:
+                    if dupe.id == keep.id:
+                        continue
+                    db.delete(dupe)
+                    removed_dupes.append(action)
+
+            for task in [t for t in builtin_tasks if t.id in kept_ids]:
+                defs = HOUSEKEEPING_DEFAULTS.get(task.action)
+                if not defs:
+                    continue
+                legacy_names = set(defs.get("legacy_names") or [])
+                if (task.name or "") in legacy_names:
+                    task.name = defs["name"]
+                    renamed.append(task.action)
+                normalized = False
+                desired_trigger = defs.get("trigger_type", "schedule")
+                if task.action == "check_email_urgency":
+                    old_crons = set(defs.get("old_cron_expressions") or [])
+                    if task.schedule == "cron" and (task.cron_expression or "") in old_crons:
+                        task.cron_expression = defs["cron_expression"]
+                        task.next_run = compute_next_run(
+                            defs["schedule"], defs["scheduled_time"], None, None,
+                            after=_utcnow(), cron_expression=defs["cron_expression"],
+                            tz_name=_resolve_task_timezone(db, task),
+                        )
+                        normalized = True
+                if desired_trigger == "event" and (
+                    (task.trigger_type or "schedule") != "event"
+                    or task.trigger_event != defs.get("trigger_event")
+                    or (task.trigger_count or 1) != (defs.get("trigger_count") or 1)
+                    or task.schedule is not None
+                    or task.scheduled_time is not None
+                    or task.scheduled_date is not None
+                    or task.cron_expression is not None
+                ):
+                    task.trigger_type = "event"
+                    task.trigger_event = defs.get("trigger_event")
+                    task.trigger_count = defs.get("trigger_count") or 1
+                    task.trigger_counter = 0
+                    task.schedule = defs.get("schedule")
+                    task.scheduled_time = defs.get("scheduled_time")
+                    task.scheduled_day = None
+                    task.scheduled_date = None
+                    task.cron_expression = defs.get("cron_expression")
+                    normalized = True
+                if normalized:
+                    renamed.append(task.action)
+                ships_paused = bool(defs.get("ship_paused"))
+                if not tasks_enabled and not tasks_opened:
+                    if ships_paused and task.status == "active":
+                        task.status = "paused"
+                    elif not ships_paused and task.status == "paused":
+                        task.status = "active"
+                        if (task.trigger_type or "schedule") == "schedule":
+                            task.next_run = compute_next_run(
+                                task.schedule, task.scheduled_time,
+                                task.scheduled_day, task.scheduled_date,
+                                after=_utcnow(), cron_expression=task.cron_expression,
+                                tz_name=_resolve_task_timezone(db, task),
+                            )
+                task.notifications_enabled = False
+                if (task.output_target or "session") == "session":
+                    task.output_target = defs.get("output_target", "none")
+            seeded = []
+            for action, defs in HOUSEKEEPING_DEFAULTS.items():
+                if action in existing_actions:
+                    continue
+                trigger_type = defs.get("trigger_type", "schedule")
+                next_run = None
+                if trigger_type == "schedule":
+                    next_run = compute_next_run(
+                        defs["schedule"], defs["scheduled_time"], None, None,
+                        after=_utcnow(), cron_expression=defs["cron_expression"],
+                    )
+                ships_paused = bool(defs.get("ship_paused"))
+                task = ScheduledTask(
+                    id=str(uuid.uuid4())[:8],
+                    owner=owner,
+                    name=defs["name"],
+                    task_type="action",
+                    action=action,
+                    trigger_type=trigger_type,
+                    trigger_event=defs.get("trigger_event"),
+                    trigger_count=defs.get("trigger_count"),
+                    trigger_counter=0,
+                    schedule=defs["schedule"],
+                    scheduled_time=defs["scheduled_time"],
+                    cron_expression=defs["cron_expression"],
+                    next_run=next_run,
+                    status="paused" if ships_paused else "active",
+                    output_target=defs.get("output_target", "none"),
+                    notifications_enabled=False,
+                )
+                db.add(task)
+                seeded.append(action)
+            if seeded or renamed or removed_dupes or retired_count:
+                logger.info(
+                    "Housekeeping defaults for %s: seeded=%s renamed=%s deduped=%s retired=%s",
+                    owner, seeded, sorted(set(renamed)), sorted(set(removed_dupes)), retired_count,
+                )
+            db.commit()
+        except Exception as e:
+            logger.warning(f"Failed to create default tasks: {e}")
+        finally:
+            db.close()
+        # Always ensure the personal assistant exists
+        try:
+            await self.ensure_assistant_defaults(owner)
+        except Exception as e:
+            logger.warning(f"Failed to seed assistant for {owner}: {e}")
+
+    async def ensure_assistant_defaults(self, owner: str):
+        """Create the personal-assistant CrewMember, its pinned session, and three
+        daily check-in ScheduledTasks for this owner — idempotent on is_default_assistant."""
+        if not owner or owner in RESERVED_USERNAMES:
+            logger.info(f"ensure_assistant_defaults: skip synthetic owner {owner!r}")
+            return
+        from core.database import SessionLocal, CrewMember, ScheduledTask
+        from core.database import Session as DbSession
+
+        db = SessionLocal()
+        try:
+            existing = db.query(CrewMember).filter(
+                CrewMember.owner == owner,
+                CrewMember.is_default_assistant == True,  # noqa: E712
+            ).first()
+            if existing:
+                return  # already seeded
+
+            endpoint_url, model = self._resolve_defaults(db, owner)
+
+            default_personality = (
+                "You are the user's personal assistant. Concise, warm, a little dry. "
+                "Never waste time with fluff. Default to English. Only match the other language when replying to a non-English email.\n\n"
+
+                "CORE RULE: You MUST use your tools to take action — do not describe what you would do. "
+                "Never say 'I would check your calendar' — actually call manage_calendar. "
+                "Never say 'I can look that up' — actually call web_search or search_chats. "
+                "If you have a tool for it, use it. No hypotheticals, no promises, only actions and results.\n\n"
+
+                "DECISION FRAMEWORK — follow these rules, not just tool descriptions:\n\n"
+
+                "CONTEXT GATHERING (before any response involving a specific person):\n"
+                "1. resolve_contact if you only have a name and need their email\n"
+                "2. search_chats for recent conversations mentioning them or their topic\n"
+                "3. manage_memory to check stored facts about them\n"
+                "Skip steps you already have answers for. Don't search for the user themselves.\n\n"
+
+                "EMAIL HANDLING:\n"
+                "- If a document is open in the editor, that IS the email. Use update_document to write the reply.\n"
+                "- BEFORE drafting any reply: gather context (steps above) about the sender and topic.\n"
+                "- When an email mentions a date/meeting: check calendar for conflicts, add if clear.\n"
+                "- When an email asks a question you can't answer from context: say so honestly. Never fabricate.\n"
+                "- Skip automated/marketing emails in check-ins. Only surface human-sent, actionable ones.\n"
+                "- Never duplicate information the user already saw in a previous check-in.\n\n"
+
+                "ESCALATION LADDER (when you need info you don't have):\n"
+                "1. search_chats (fast, free)\n"
+                "2. manage_memory (fast, free)\n"
+                "3. web_search (medium cost)\n"
+                "4. trigger_research (expensive, async — only for complex multi-source questions)\n"
+                "Stop as soon as you have a sufficient answer.\n\n"
+
+                "'SEND TO [NAME]' FLOW:\n"
+                "1. resolve_contact to find their email\n"
+                "2. If a document is open, use its content as the body\n"
+                "3. Draft the email in a document (create_document with language='email')\n"
+                "4. Tell the user to review — NEVER auto-send\n\n"
+
+                "SELF-IMPROVEMENT — use manage_memory constantly:\n"
+                "- When the user corrects you, IMMEDIATELY store the correction as a memory.\n"
+                "- After every check-in or task, store new facts you learned (contacts, preferences, patterns).\n"
+                "- Before responding about a person or topic, search_chats and manage_memory FIRST.\n"
+                "- Build knowledge over time: who people are, what projects are active, how the user likes things done.\n"
+                "- If something failed or you got corrected, store WHY so you never repeat it.\n"
+                "- When you figure out a multi-step workflow that works, save it as a SKILL using manage_skills.\n"
+                "  A skill is a reusable procedure. Next time, recall the skill instead of figuring it out again.\n"
+                "- Before starting a complex task, check manage_skills for an existing procedure.\n\n"
+
+                "AUTONOMY RULES:\n"
+                "- Auto-add calendar events from clear meeting invitations (mention what you added)\n"
+                "- Auto-draft email replies (cached for when user clicks Reply)\n"
+                "- NEVER send emails without explicit user instruction\n"
+                "- NEVER delete anything without explicit instruction\n"
+                "- If uncertain, ask rather than guess"
+            )
+
+            # Create the singleton session first
+            session_id = str(uuid.uuid4())
+            sess = DbSession(
+                id=session_id,
+                name="Assistant",
+                endpoint_url=endpoint_url or "",
+                model=model or "",
+                owner=owner,
+                is_important=True,
+                mode="agent",
+                folder="Assistant",
+                created_at=_utcnow(),
+                updated_at=_utcnow(),
+            )
+            db.add(sess)
+            db.flush()
+
+            # Create the assistant CrewMember
+            crew_id = str(uuid.uuid4())
+            assistant = CrewMember(
+                id=crew_id,
+                owner=owner,
+                name="Assistant",
+                avatar=None,
+                user_name=None,
+                personality=default_personality,
+                model=model,
+                endpoint_url=endpoint_url,
+                greeting=None,
+                enabled_tools=json.dumps([
+                    "manage_calendar", "manage_notes", "manage_tasks", "manage_memory",
+                    "list_email_accounts", "list_emails", "read_email", "send_email", "reply_to_email", "archive_email",
+                    "mark_email_read", "delete_email", "resolve_contact",
+                    "search_chats", "web_search", "web_fetch", "read_file",
+                    "create_document", "update_document", "edit_document",
+                    "generate_image", "trigger_research",
+                    "download_model", "serve_model", "list_served_models", "stop_served_model",
+                    "edit_image",
+                ]),
+                session_id=session_id,
+                is_active=True,
+                sort_order=0,
+                is_default_assistant=True,
+                timezone=None,
+            )
+            db.add(assistant)
+
+            # Link the session back to the crew member
+            sess.crew_member_id = crew_id
+
+            db.commit()
+            logger.info(f"Seeded personal assistant (crew {crew_id}) for owner={owner}")
+        except Exception as e:
+            logger.exception(f"ensure_assistant_defaults({owner}) failed: {e}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        finally:
+            db.close()

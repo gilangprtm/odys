@@ -57,7 +57,7 @@ def _seed_session(SessionLocal, *, owner="alice", content="existing durable hist
             session_id=session_id,
             role="user",
             content=content,
-            meta_data=json.dumps({"source": "before-replacement"}),
+            meta_data={"source": "before-replacement"},
         ))
         db.commit()
     finally:

@@ -501,6 +501,6 @@ async def collect_service_health(rag_manager: Any = None,
         "overall": _rollup(services),
         "services": services,
         # Timezone-aware UTC (…+00:00). Avoids the deprecated naive
-        # datetime.utcnow() flagged in review (overlaps with #1116).
+        # datetime.now(timezone.utc).replace(tzinfo=None) flagged in review (overlaps with #1116).
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }

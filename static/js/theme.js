@@ -53,7 +53,7 @@ export const THEMES = {
                 } },
 };
 
-const DEFAULT_THEME = 'dark';
+const DEFAULT_THEME = 'command';
 const LS_KEY = 'odysseus-theme';
 const CUSTOM_THEMES_KEY = 'odysseus-custom-themes';
 

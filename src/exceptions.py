@@ -8,6 +8,7 @@ exception classes from core.exceptions so there is exactly one place that
 defines them. Existing `from src.exceptions import ...` callers keep working.
 """
 from core.exceptions import (  # noqa: F401
+    AppError,
     SessionNotFoundError,
     InvalidFileUploadError,
     LLMServiceError,
@@ -15,6 +16,7 @@ from core.exceptions import (  # noqa: F401
 )
 
 __all__ = [
+    "AppError",
     "SessionNotFoundError",
     "InvalidFileUploadError",
     "LLMServiceError",

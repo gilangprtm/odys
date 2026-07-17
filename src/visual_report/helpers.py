@@ -1,29 +1,16 @@
-# src/visual_report.py
+# src/visual_report/helpers.py
 """
-Generate a self-contained, styled HTML page from deep research results.
+Helpers for generate_visual_report — markdown-to-HTML conversion, heading
+extraction, image injection, category-specific CSS, title extraction, and
+the HTML template itself.
+"""
 
-Takes the markdown report, sources, and stats produced by DeepResearcher
-and wraps them in an editorial-quality HTML document with:
-- System/local typography, no remote font provider
-- Dark/light theme via prefers-color-scheme
-- Hero section with animated gradient + optional hero image
-- Inline OG images between sections
-- Auto-generated table of contents from headings
-- Collapsible compact sources list
-- Print/Share toolbar
-"""
 import html
-import json
 import logging
 import re
-from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 from bs4 import BeautifulSoup
-
-from src.research_utils import strip_thinking
-from urllib.parse import urlparse
-
 import markdown
 import nh3
 
@@ -59,8 +46,8 @@ def _autolink_urls(md_text: str) -> str:
         return md_text
     # Match bare URLs not already inside ](...)
     return re.sub(
-        r'(?<!\]\()(?<!\()(https?://[^\s\)<>]+)',
-        r'[\1](\1)',
+        r'(?<!\\]\\()(?<!\\()(https?://[^\\s\\)<>]+)',
+        r'[\\1](\\1)',
         md_text,
     )
 
@@ -86,7 +73,7 @@ def _md_to_html(md_text: str) -> str:
     # Make external links open in new tab
     result = re.sub(
         r'<a href="(https?://)',
-        r'<a target="_blank" rel="noopener noreferrer" href="\1',
+        r'<a target="_blank" rel="noopener noreferrer" href="\\1',
         result,
     )
     # Sanitize: report content is untrusted and the report CSP allows inline
@@ -112,17 +99,17 @@ def _extract_headings(md_text: str) -> List[Dict[str, str]]:
     # markdown renderer, so counting it here desynced the TOC anchor ids
     # (built by zipping these headings against the rendered <h2>/<h3>), making
     # every later TOC link point at the wrong section.
-    md_text = re.sub(r'(?ms)^[ \t]*(`{3,}|~{3,})[^\n]*\n.*?^[ \t]*\1[ \t]*$', '', md_text)
+    md_text = re.sub(r'(?ms)^[ \\t]*(`{3,}|~{3,})[^\\n]*\\n.*?^[ \\t]*\\1[ \\t]*$', '', md_text)
 
     def _plain_heading_text(text: str) -> str:
         text = text.strip().rstrip("#").strip()
-        text = re.sub(r'!\[([^\]]*)\]\([^)]+\)', r'\1', text)
-        text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
-        text = re.sub(r'\[([^\]]+)\]\[[^\]]+\]', r'\1', text)
+        text = re.sub(r'!\\[([^\\]]*)\\]\\([^)]+\\)', r'\\1', text)
+        text = re.sub(r'\\[([^\\]]+)\\]\\([^)]+\\)', r'\\1', text)
+        text = re.sub(r'\\[([^\\]]+)\\]\\[[^\\]]+\\]', r'\\1', text)
         text = re.sub(r'<[^>]+>', '', text)
         text = re.sub(r'[`*_~]+', '', text)
         text = html.unescape(text)
-        return re.sub(r'\s+', ' ', text).strip()
+        return re.sub(r'\\s+', ' ', text).strip()
 
     def _make_slug(text: str) -> str:
         base = re.sub(r'[^a-z0-9]+', '-', text.lower()).strip('-')
@@ -143,14 +130,14 @@ def _extract_headings(md_text: str) -> List[Dict[str, str]]:
         seen_slugs[base] = 0
         return base
 
-    for m in re.finditer(r'^(#{2,3})\s+(.+)$', md_text, re.MULTILINE):
+    for m in re.finditer(r'^(#{2,3})\\s+(.+)$', md_text, re.MULTILINE):
         level = len(m.group(1))
         text = _plain_heading_text(m.group(2))
         if not text:
             continue
         headings.append({"level": level, "text": text, "slug": _make_slug(text)})
     if not headings:
-        for m in re.finditer(r'^\*\*([^*]+)\*\*\s*$', md_text, re.MULTILINE):
+        for m in re.finditer(r'^\\*\\*([^*]+)\\*\\*\\s*$', md_text, re.MULTILINE):
             text = _plain_heading_text(m.group(1)).rstrip(':')
             if 3 < len(text) < 80:
                 headings.append({"level": 2, "text": text, "slug": _make_slug(text)})
@@ -251,9 +238,9 @@ _TEMPLATE = """\
 <meta name="theme-color" content="#131214" media="(prefers-color-scheme: dark)">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='75' font-size='75'>O</text></svg>">
 <style>
-*, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-:root {{
+:root {
   --font-display: 'Charter', 'Iowan Old Style', Georgia, serif;
   --font-body: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -277,10 +264,10 @@ _TEMPLATE = """\
   --shadow-sm: 0 1px 3px rgba(0,0,0,0.05);
   --shadow-md: 0 4px 24px rgba(0,0,0,0.07);
   --max-w: 760px;
-}}
+}
 
-@media (prefers-color-scheme: dark) {{
-  :root {{
+@media (prefers-color-scheme: dark) {
+  :root {
     --bg: #131214; --bg-surface: #1c1a1e; --bg-surface-alt: #25232a;
     --border: rgba(255,255,255,0.07); --border-strong: rgba(255,255,255,0.16);
     --text: #ece8e2; --text-dim: #a8a39c; --text-muted: #6f6b66;
@@ -290,16 +277,14 @@ _TEMPLATE = """\
     --aurora-b: rgba(232,192,90,0.09);
     --aurora-c: rgba(125,180,224,0.10);
     --shadow-sm: 0 1px 3px rgba(0,0,0,0.4); --shadow-md: 0 4px 28px rgba(0,0,0,0.55);
-  }}
-}}
+  }
+}
 
-html {{
+html {
   scroll-behavior: smooth;
-  /* Give smooth-scroll some breathing room so anchors land below the
-     fixed toolbar instead of being shoved straight under it. */
   scroll-padding-top: 4rem;
-}}
-body {{
+}
+body {
   font-family: var(--font-body);
   background: var(--bg);
   color: var(--text);
@@ -310,13 +295,9 @@ body {{
   text-rendering: optimizeLegibility;
   position: relative;
   min-height: 100vh;
-}}
+}
 
-/* ── Aurora background ─────────────────────────────────
-   Slowly-drifting layered blobs in the accent palette. Sits behind
-   the content, fixed to the viewport so scrolling doesn't reset the
-   composition. Subtle grain on top stops it reading as 'flat CSS'. */
-body::before {{
+body::before {
   content: '';
   position: fixed;
   inset: -20vh -20vw;
@@ -328,29 +309,28 @@ body::before {{
   filter: blur(20px);
   animation: aurora-drift 28s ease-in-out infinite alternate;
   pointer-events: none;
-}}
-body::after {{
+}
+body::after {
   content: '';
   position: fixed;
   inset: 0;
   z-index: -1;
   pointer-events: none;
-  /* Subtle film-grain — SVG turbulence baked to a data-URL. */
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.32 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
   opacity: 0.045;
   mix-blend-mode: overlay;
-}}
-@keyframes aurora-drift {{
-  0%   {{ transform: translate3d(0,0,0) scale(1);     }}
-  50%  {{ transform: translate3d(2vw,-1vh,0) scale(1.04); }}
-  100% {{ transform: translate3d(-1vw,1.5vh,0) scale(1.02); }}
-}}
-@media (prefers-reduced-motion: reduce) {{
-  body::before {{ animation: none; }}
-}}
+}
+@keyframes aurora-drift {
+  0%   { transform: translate3d(0,0,0) scale(1);     }
+  50%  { transform: translate3d(2vw,-1vh,0) scale(1.04); }
+  100% { transform: translate3d(-1vw,1.5vh,0) scale(1.02); }
+}
+@media (prefers-reduced-motion: reduce) {
+  body::before { animation: none; }
+}
 
 /* ── Toolbar (top-right) ──────────────────────────── */
-.toolbar {{
+.toolbar {
   position: fixed;
   top: 1rem;
   right: 1rem;
@@ -359,9 +339,9 @@ body::after {{
   gap: 0.4rem;
   opacity: 0.7;
   transition: opacity 0.2s;
-}}
-.toolbar:hover {{ opacity: 1; }}
-.toolbar button {{
+}
+.toolbar:hover { opacity: 1; }
+.toolbar button {
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -377,10 +357,10 @@ body::after {{
   box-shadow: var(--shadow-sm);
   transition: background 0.15s;
   position: relative;
-}}
-.toolbar button:hover {{ background: var(--bg-surface-alt); }}
-.toolbar button svg {{ width: 14px; height: 14px; flex-shrink: 0; }}
-.toolbar .toast {{
+}
+.toolbar button:hover { background: var(--bg-surface-alt); }
+.toolbar button svg { width: 14px; height: 14px; flex-shrink: 0; }
+.toolbar .toast {
   position: absolute;
   top: calc(100% + 6px);
   right: 0;
@@ -393,10 +373,10 @@ body::after {{
   opacity: 0;
   transition: opacity 0.15s;
   pointer-events: none;
-}}
-.toolbar .toast.show {{ opacity: 1; }}
-.dropdown {{ position: relative; }}
-.dropdown-menu {{
+}
+.toolbar .toast.show { opacity: 1; }
+.dropdown { position: relative; }
+.dropdown-menu {
   display: none;
   position: absolute;
   top: calc(100% + 4px);
@@ -407,9 +387,9 @@ body::after {{
   box-shadow: var(--shadow-md);
   overflow: hidden;
   min-width: 140px;
-}}
-.dropdown-menu.open {{ display: block; }}
-.dropdown-menu button {{
+}
+.dropdown-menu.open { display: block; }
+.dropdown-menu button {
   display: block;
   width: 100%;
   padding: 8px 14px;
@@ -420,29 +400,27 @@ body::after {{
   font-size: 0.8rem;
   text-align: left;
   cursor: pointer;
-}}
-.dropdown-menu button:hover {{ background: var(--bg-surface-alt); }}
+}
+.dropdown-menu button:hover { background: var(--bg-surface-alt); }
 
 /* ── Hero ──────────────────────────────────────────── */
-.hero {{
+.hero {
   position: relative;
   background: transparent;
   color: var(--text);
   padding: 5.5rem 2rem 2.5rem;
   text-align: center;
   overflow: hidden;
-}}
-.hero::before {{
+}
+.hero::before {
   content: '';
   position: absolute;
   inset: 0;
   background:
     radial-gradient(ellipse 70% 60% at 50% 40%, color-mix(in srgb, var(--accent) 10%, transparent) 0%, transparent 70%);
   pointer-events: none;
-}}
-/* A hair-thin gradient hairline divider under the hero to anchor it
-   without putting it on a heavy boxed background. */
-.hero::after {{
+}
+.hero::after {
   content: '';
   position: absolute;
   left: 50%; bottom: 0;
@@ -450,8 +428,8 @@ body::after {{
   height: 1px;
   transform: translateX(-50%);
   background: linear-gradient(90deg, transparent, var(--border-strong), transparent);
-}}
-.hero-label {{
+}
+.hero-label {
   position: relative;
   text-transform: uppercase;
   letter-spacing: 0.28em;
@@ -461,8 +439,8 @@ body::after {{
   opacity: 0.85;
   margin-bottom: 1.4rem;
   font-family: var(--font-body);
-}}
-.hero h1 {{
+}
+.hero h1 {
   position: relative;
   font-family: var(--font-display);
   font-size: clamp(2rem, 4.5vw, 3rem);
@@ -473,44 +451,41 @@ body::after {{
   margin: 0 auto;
   letter-spacing: -0.02em;
   color: var(--text);
-}}
+}
 
 /* ── Hero image ───────────────────────────────────── */
-.hero-image {{
+.hero-image {
   max-width: var(--max-w);
   margin: -2rem auto 0;
   position: relative;
   z-index: 1;
   padding: 0 2rem;
-}}
-.hero-image img {{
+}
+.hero-image img {
   width: 100%;
   max-height: 360px;
   object-fit: cover;
   border-radius: var(--radius);
   box-shadow: var(--shadow-md);
   display: block;
-}}
+}
 
 /* ── Section images ───────────────────────────────── */
-.section-image {{
+.section-image {
   margin: 1.5rem 0;
   position: relative;
-}}
-.section-image img {{
+}
+.section-image img {
   width: 100%;
   max-height: 300px;
   object-fit: cover;
   border-radius: var(--radius);
   box-shadow: var(--shadow-sm);
   display: block;
-}}
+}
 
-/* ── Per-image hide button ────────────────────────────
-   A small X that appears on hover (or always on touch) so users can
-   remove irrelevant OG images. Click POSTs the URL to the backend so
-   the next render skips it. */
-.img-hide-btn {{
+/* ── Per-image hide button ──────────────────────────── */
+.img-hide-btn {
   position: absolute;
   top: 10px; right: 10px;
   width: 28px; height: 28px;
@@ -524,10 +499,9 @@ body::after {{
   transition: opacity 0.15s ease, background 0.15s ease, transform 0.05s ease;
   z-index: 2;
   padding: 0;
-}}
-.hero-image .img-hide-btn {{ top: 14px; right: 2.5rem; }}
-/* Reroll sits just to the left of the hide button. */
-.img-reroll-btn {{
+}
+.hero-image .img-hide-btn { top: 14px; right: 2.5rem; }
+.img-reroll-btn {
   position: absolute;
   top: 10px; right: 46px;
   width: 28px; height: 28px;
@@ -541,32 +515,31 @@ body::after {{
   transition: opacity 0.15s ease, background 0.15s ease, transform 0.05s ease;
   z-index: 2;
   padding: 0;
-}}
-.hero-image .img-reroll-btn {{ top: 14px; right: calc(2.5rem + 36px); }}
+}
+.hero-image .img-reroll-btn { top: 14px; right: calc(2.5rem + 36px); }
 .section-image:hover .img-hide-btn,
 .section-image:hover .img-reroll-btn,
 .hero-image:hover .img-hide-btn,
-.hero-image:hover .img-reroll-btn {{ opacity: 1; }}
-.img-hide-btn:hover {{ background: var(--accent); }}
-.img-reroll-btn:hover {{ background: var(--accent); }}
+.hero-image:hover .img-reroll-btn { opacity: 1; }
+.img-hide-btn:hover { background: var(--accent); }
+.img-reroll-btn:hover { background: var(--accent); }
 .img-hide-btn:active,
-.img-reroll-btn:active {{ transform: scale(0.92); }}
-.img-reroll-btn.spinning svg {{ animation: img-reroll-spin 0.6s linear infinite; }}
-.img-reroll-btn:disabled {{ display: none; }}
-@keyframes img-reroll-spin {{ to {{ transform: rotate(360deg); }} }}
-@media (hover: none) {{
-  /* Touch devices have no hover — show the buttons at low opacity always. */
-  .img-hide-btn, .img-reroll-btn {{ opacity: 0.7; }}
-}}
+.img-reroll-btn:active { transform: scale(0.92); }
+.img-reroll-btn.spinning svg { animation: img-reroll-spin 0.6s linear infinite; }
+.img-reroll-btn:disabled { display: none; }
+@keyframes img-reroll-spin { to { transform: rotate(360deg); } }
+@media (hover: none) {
+  .img-hide-btn, .img-reroll-btn { opacity: 0.7; }
+}
 .section-image.fading,
-.hero-image.fading {{
+.hero-image.fading {
   opacity: 0;
   transform: scale(0.96);
   transition: opacity 0.25s ease, transform 0.25s ease;
-}}
+}
 
 /* ── Stats bar ─────────────────────────────────────── */
-.stats-bar {{
+.stats-bar {
   display: flex;
   justify-content: center;
   gap: 1.5rem;
@@ -576,31 +549,31 @@ body::after {{
   border-bottom: 1px solid var(--border);
   font-size: 0.82rem;
   color: var(--text-dim);
-}}
-.stat {{ display: flex; align-items: center; gap: 0.35rem; }}
-.stat-value {{ font-weight: 600; color: var(--text); }}
+}
+.stat { display: flex; align-items: center; gap: 0.35rem; }
+.stat-value { font-weight: 600; color: var(--text); }
 
 /* ── Layout ────────────────────────────────────────── */
-.layout {{
+.layout {
   display: grid;
   grid-template-columns: 200px 1fr;
   max-width: calc(var(--max-w) + 260px);
   margin: 0 auto;
-}}
-@media (max-width: 900px) {{
-  .layout {{ grid-template-columns: 1fr; }}
-  .toc-sidebar {{ display: none; }}
-}}
+}
+@media (max-width: 900px) {
+  .layout { grid-template-columns: 1fr; }
+  .toc-sidebar { display: none; }
+}
 
 /* ── TOC sidebar ───────────────────────────────────── */
-.toc-sidebar {{
+.toc-sidebar {
   position: sticky; top: 0; height: 100vh; overflow-y: auto;
   padding: 3.2rem 0.8rem 2rem 1.4rem;
   border-right: 1px solid var(--border);
   font-size: 0.78rem;
-}}
-.toc-sidebar nav {{ position: relative; }}
-.toc-sidebar nav a {{
+}
+.toc-sidebar nav { position: relative; }
+.toc-sidebar nav a {
   position: relative;
   display: block;
   color: var(--text-dim);
@@ -611,9 +584,8 @@ body::after {{
   line-height: 1.4;
   letter-spacing: -0.005em;
   transition: color 0.18s ease, background 0.18s ease, padding-left 0.18s ease;
-}}
-/* Sliding accent indicator on the left edge of each TOC link */
-.toc-sidebar nav a::before {{
+}
+.toc-sidebar nav a::before {
   content: '';
   position: absolute;
   left: 0; top: 50%;
@@ -623,38 +595,36 @@ body::after {{
   border-radius: 1px;
   transition: height 0.18s ease, opacity 0.18s ease;
   opacity: 0;
-}}
-.toc-sidebar nav a:hover {{
+}
+.toc-sidebar nav a:hover {
   color: var(--text);
   background: var(--accent-bg);
   padding-left: 1rem;
-}}
-.toc-sidebar nav a:hover::before {{
+}
+.toc-sidebar nav a:hover::before {
   height: 60%;
   opacity: 1;
-}}
-.toc-sidebar nav a.active {{
+}
+.toc-sidebar nav a.active {
   color: var(--accent);
   font-weight: 600;
   background: var(--accent-bg);
-}}
-.toc-sidebar nav a.active::before {{
+}
+.toc-sidebar nav a.active::before {
   height: 80%;
   opacity: 1;
-}}
-.toc-sidebar nav a.depth-3 {{
+}
+.toc-sidebar nav a.depth-3 {
   padding-left: 1.3rem;
   font-size: 0.72rem;
   color: var(--text-muted);
-}}
-.toc-sidebar nav a.depth-3:hover {{ padding-left: 1.45rem; }}
+}
+.toc-sidebar nav a.depth-3:hover { padding-left: 1.45rem; }
 
 /* ── Content ───────────────────────────────────────── */
-.content {{ max-width: var(--max-w); padding: 3rem 2.5rem 4rem; }}
+.content { max-width: var(--max-w); padding: 3rem 2.5rem 4rem; }
 
-/* Display headings — Fraunces optical-size driven so they get more
-   contrast and personality at the larger end. */
-.content h2 {{
+.content h2 {
   font-family: var(--font-display);
   font-size: clamp(1.55rem, 2.4vw, 1.85rem);
   font-weight: 600;
@@ -666,9 +636,9 @@ body::after {{
   letter-spacing: -0.022em;
   line-height: 1.2;
   color: var(--text);
-}}
-.content h2:first-child {{ margin-top: 0; }}
-.content h3 {{
+}
+.content h2:first-child { margin-top: 0; }
+.content h3 {
   font-family: var(--font-display);
   font-size: 1.22rem;
   font-weight: 600;
@@ -676,8 +646,8 @@ body::after {{
   margin: 2.2rem 0 0.6rem;
   letter-spacing: -0.015em;
   color: var(--text);
-}}
-.content h4 {{
+}
+.content h4 {
   font-family: var(--font-body);
   font-size: 0.78rem;
   font-weight: 700;
@@ -685,13 +655,11 @@ body::after {{
   letter-spacing: 0.12em;
   color: var(--text-dim);
   margin: 1.6rem 0 0.5rem;
-}}
-.content p {{ margin-bottom: 1.1rem; hanging-punctuation: first last; }}
+}
+.content p { margin-bottom: 1.1rem; hanging-punctuation: first last; }
 
-/* Drop cap on the very first paragraph of the body — old-school editorial
-   touch that anchors the reader. */
 .content > p:first-of-type::first-letter,
-.content > h2:first-child + p::first-letter {{
+.content > h2:first-child + p::first-letter {
   font-family: var(--font-display);
   font-weight: 700;
   font-variation-settings: 'opsz' 144;
@@ -700,25 +668,25 @@ body::after {{
   float: left;
   margin: 0.15em 0.12em 0 -0.04em;
   color: var(--accent);
-}}
+}
 
-.content a {{
+.content a {
   color: var(--accent);
   text-decoration: underline;
   text-decoration-color: color-mix(in srgb, var(--accent) 35%, transparent);
   text-decoration-thickness: 1.5px;
   text-underline-offset: 3px;
   transition: text-decoration-color 0.15s, color 0.15s;
-}}
-.content a:hover {{
+}
+.content a:hover {
   text-decoration-color: var(--accent);
   color: var(--accent-light);
-}}
-.content ul, .content ol {{ margin: 0 0 1.1rem 1.6rem; }}
-.content li {{ margin-bottom: 0.4rem; }}
-.content li::marker {{ color: var(--accent); }}
-.content li > ul, .content li > ol {{ margin-top: 0.4rem; margin-bottom: 0; }}
-.content blockquote {{
+}
+.content ul, .content ol { margin: 0 0 1.1rem 1.6rem; }
+.content li { margin-bottom: 0.4rem; }
+.content li::marker { color: var(--accent); }
+.content li > ul, .content li > ol { margin-top: 0.4rem; margin-bottom: 0; }
+.content blockquote {
   position: relative;
   border-left: 3px solid var(--gold);
   background: var(--gold-bg);
@@ -730,8 +698,8 @@ body::after {{
   font-style: italic;
   font-size: 1.05rem;
   line-height: 1.55;
-}}
-.content blockquote::before {{
+}
+.content blockquote::before {
   content: '\\201C';
   position: absolute;
   left: 0.5rem; top: 0.3rem;
@@ -741,95 +709,95 @@ body::after {{
   color: var(--gold);
   opacity: 0.5;
   line-height: 1;
-}}
-.content hr {{ border: none; height: 1px; background: linear-gradient(90deg, transparent, var(--border-strong), transparent); margin: 2rem 0; }}
-.content code {{ font-family: var(--font-mono); font-size: 0.86em; background: var(--bg-surface-alt); padding: 0.15em 0.4em; border-radius: 4px; }}
-.content pre {{ background: var(--bg-surface-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.25rem 1.5rem; overflow-x: auto; margin: 1.25rem 0; font-size: 0.86rem; line-height: 1.6; }}
-.content pre code {{ background: none; padding: 0; }}
-.content table {{ width: 100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.9rem; border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow-sm); }}
-.content th {{ text-align: left; padding: 0.7rem 1rem; background: var(--accent-bg); font-weight: 600; border-bottom: 2px solid var(--border-strong); }}
-.content td {{ padding: 0.6rem 1rem; border-bottom: 1px solid var(--border); vertical-align: top; }}
-.content tr:last-child td {{ border-bottom: none; }}
-.content tr:hover td {{ background: var(--accent-bg); }}
+}
+.content hr { border: none; height: 1px; background: linear-gradient(90deg, transparent, var(--border-strong), transparent); margin: 2rem 0; }
+.content code { font-family: var(--font-mono); font-size: 0.86em; background: var(--bg-surface-alt); padding: 0.15em 0.4em; border-radius: 4px; }
+.content pre { background: var(--bg-surface-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.25rem 1.5rem; overflow-x: auto; margin: 1.25rem 0; font-size: 0.86rem; line-height: 1.6; }
+.content pre code { background: none; padding: 0; }
+.content table { width: 100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.9rem; border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow-sm); }
+.content th { text-align: left; padding: 0.7rem 1rem; background: var(--accent-bg); font-weight: 600; border-bottom: 2px solid var(--border-strong); }
+.content td { padding: 0.6rem 1rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+.content tr:last-child td { border-bottom: none; }
+.content tr:hover td { background: var(--accent-bg); }
 
 /* ── Sources (collapsible list) ───────────────────── */
-.sources-panel {{ margin-top: 3rem; border-top: 2px solid var(--border); padding-top: 1.5rem; }}
-.sources-panel details {{ margin: 0; }}
-.sources-panel summary {{
+.sources-panel { margin-top: 3rem; border-top: 2px solid var(--border); padding-top: 1.5rem; }
+.sources-panel details { margin: 0; }
+.sources-panel summary {
   display: flex; align-items: center; gap: 0.5rem;
   cursor: pointer; font-size: 1rem; font-weight: 600;
   color: var(--text); padding: 0.5rem 0; list-style: none;
   user-select: none;
-}}
-.sources-panel summary::-webkit-details-marker {{ display: none; }}
-.sources-panel summary::before {{
+}
+.sources-panel summary::-webkit-details-marker { display: none; }
+.sources-panel summary::before {
   content: '\\25B6'; font-size: 0.65em; color: var(--text-muted);
   transition: transform 0.2s;
-}}
-.sources-panel details[open] summary::before {{ transform: rotate(90deg); }}
-.sources-list {{ padding: 0.5rem 0 0 0.25rem; }}
-.sources-list a {{
+}
+.sources-panel details[open] summary::before { transform: rotate(90deg); }
+.sources-list { padding: 0.5rem 0 0 0.25rem; }
+.sources-list a {
   display: flex; align-items: baseline; gap: 0.5rem;
   padding: 0.35rem 0; font-size: 0.85rem;
   color: var(--text); text-decoration: none;
   transition: color 0.15s;
-}}
-.sources-list a:hover {{ color: var(--accent); }}
-.sources-list .snum {{
+}
+.sources-list a:hover { color: var(--accent); }
+.sources-list .snum {
   color: var(--text-muted); font-size: 0.75rem;
   min-width: 1.5rem; text-align: right; flex-shrink: 0;
-}}
-.sources-list .sdomain {{
+}
+.sources-list .sdomain {
   color: var(--text-muted); font-size: 0.75rem;
   margin-left: auto; flex-shrink: 0;
-}}
+}
 
 /* ── Chat-about CTA ────────────────────────────────── */
-.chat-cta {{
+.chat-cta {
   margin: 3rem 0 1rem; padding: 1.5rem;
   text-align: center;
   border: 1px solid var(--border); border-radius: 12px;
   background: var(--bg-surface);
-}}
-.chat-cta-btn {{
+}
+.chat-cta-btn {
   display: inline-flex; align-items: center; gap: 8px;
   padding: 10px 18px; font-size: 0.95rem; font-weight: 600;
   background: var(--accent); color: #fff;
   border: none; border-radius: 8px; cursor: pointer;
   font-family: inherit;
   transition: filter 0.15s, transform 0.05s;
-}}
-.chat-cta-btn:hover:not(:disabled) {{ filter: brightness(1.1); }}
-.chat-cta-btn:active:not(:disabled) {{ transform: translateY(1px); }}
-.chat-cta-btn:disabled {{ opacity: 0.6; cursor: progress; }}
-.chat-cta-hint {{
+}
+.chat-cta-btn:hover:not(:disabled) { filter: brightness(1.1); }
+.chat-cta-btn:active:not(:disabled) { transform: translateY(1px); }
+.chat-cta-btn:disabled { opacity: 0.6; cursor: progress; }
+.chat-cta-hint {
   margin-top: 8px; font-size: 0.8rem; color: var(--text-muted);
-}}
+}
 
 /* ── Footer ────────────────────────────────────────── */
-.report-footer {{
+.report-footer {
   text-align: center; padding: 2rem; font-size: 0.75rem;
   color: var(--text-muted); border-top: 1px solid var(--border); margin-top: 2rem;
-}}
+}
 
 /* ── Animations ────────────────────────────────────── */
-@media (prefers-reduced-motion: no-preference) {{
+@media (prefers-reduced-motion: no-preference) {
   .content h2, .content h3, .content p, .content ul, .content ol,
-  .content blockquote, .content table, .content pre, .section-image {{
+  .content blockquote, .content table, .content pre, .section-image {
     animation: fadeUp 0.4s ease both;
-  }}
-  @keyframes fadeUp {{
-    from {{ opacity: 0; transform: translateY(8px); }}
-    to   {{ opacity: 1; transform: translateY(0); }}
-  }}
-}}
+  }
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(8px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+}
 
 /* ── Print ─────────────────────────────────────────── */
-@media print {{
-  .toc-sidebar, .toolbar {{ display: none !important; }}
-  .layout {{ grid-template-columns: 1fr; }}
-  .hero {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
-}}
+@media print {
+  .toc-sidebar, .toolbar { display: none !important; }
+  .layout { grid-template-columns: 1fr; }
+  .hero { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+}
 {category_css}
 </style>
 </head>
@@ -882,20 +850,14 @@ body::after {{
 
 <script>
 (function() {{
-  // ESC closes the report tab. window.close() works when the tab was
-  // opened via window.open() (which is how the panel launches it). If the
-  // browser blocks self-close (rare — e.g. report opened by direct URL),
-  // fall back to history.back() so ESC still feels responsive.
+  // ESC closes the report tab.
   document.addEventListener('keydown', function(e) {{
     if (e.key !== 'Escape' || e.defaultPrevented) return;
-    // Don't hijack ESC while typing in a field or with an open dropdown.
     var t = e.target;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
     var menu = document.getElementById('export-menu');
     if (menu && menu.classList.contains('open')) {{ menu.classList.remove('open'); return; }}
     try {{ window.close(); }} catch (err) {{}}
-    // window.close() is a no-op when the tab wasn't script-opened; in that
-    // case fall back to navigation so the key isn't ignored.
     setTimeout(function() {{ if (!window.closed) history.back(); }}, 50);
   }});
 
@@ -924,15 +886,10 @@ body::after {{
     a.click();
   }});
 
-  // Per-image hide — fades the image out, then POSTs to the backend so
-  // future renders of this report skip the URL. Falls back to a silent
-  // no-op if there's no session_id (e.g. the report was opened from a
-  // saved-HTML download where the backend isn't reachable).
+  // Per-image hide — fades the image out, then POSTs to the backend
   var __sessionId = {session_id_js};
-  // Unused scraped images — the reroll pool. Each is used at most once.
   var __spareImages = {spare_images_js};
 
-  // Persist a rejected URL so future renders skip it.
   function __persistHide(url) {{
     if (!__sessionId || !url) return;
     fetch('/api/research/' + encodeURIComponent(__sessionId) + '/hide-image', {{
@@ -943,7 +900,6 @@ body::after {{
     }}).catch(function(err) {{ console.warn('hide-image POST failed', err); }});
   }}
 
-  // Once the pool is empty, there's nothing to swap to — hide all reroll btns.
   function __syncRerollAvailability() {{
     if (__spareImages.length === 0) {{
       document.querySelectorAll('.img-reroll-btn').forEach(function(b) {{ b.disabled = true; }});
@@ -962,14 +918,9 @@ body::after {{
     }});
   }});
 
-  // Reroll — swap the current image for the next unused scraped one, and
-  // persist-hide the rejected URL so it won't resurface on reload.
   document.querySelectorAll('.img-reroll-btn').forEach(function(btn) {{
     btn.addEventListener('click', function(e) {{
       e.preventDefault(); e.stopPropagation();
-      // Per-button busy flag — a rapid double-click would otherwise both
-      // shift the spare pool, but only the second probe's image would land,
-      // silently consuming the first one. Bail until finish() clears it.
       if (btn.dataset._busy === '1') return;
       if (__spareImages.length === 0) {{ btn.disabled = true; return; }}
       var wrap = btn.closest('[data-img-url]');
@@ -980,7 +931,6 @@ body::after {{
       var oldUrl = wrap.dataset.imgUrl;
       var newUrl = __spareImages.shift();
       btn.classList.add('spinning');
-      // Swap once the new image has loaded (or failed) to avoid a flash of empty.
       var probe = new Image();
       var done = false;
       var finish = function(ok) {{
@@ -992,9 +942,6 @@ body::after {{
           wrap.dataset.imgUrl = newUrl;
           __persistHide(oldUrl);
         }} else {{
-          // Bad candidate — persist-hide it so it can't resurface on reload,
-          // then try the next spare if any remain. Busy flag already cleared
-          // so the synthetic click below proceeds.
           __persistHide(newUrl);
           if (__spareImages.length) btn.click();
         }}
@@ -1007,8 +954,7 @@ body::after {{
   }});
   __syncRerollAvailability();
 
-  // "Show hidden (N)" button — clears the hidden_images list on the
-  // server, then reloads the page so all images come back.
+  // "Show hidden (N)" button
   var restoreBtn = document.getElementById('btn-restore-images');
   if (restoreBtn && __sessionId) {{
     restoreBtn.addEventListener('click', function() {{
@@ -1025,9 +971,7 @@ body::after {{
     }});
   }}
 
-  // TOC: explicit smooth-scroll handler (some browsers/anchor plugins
-  // bypass the CSS `scroll-behavior: smooth` rule on hash clicks).
-  // Also keeps the URL hash updated and toggles an `.active` highlight.
+  // TOC smooth-scroll handler
   var tocLinks = document.querySelectorAll('.toc-sidebar nav a[href^="#"]');
   tocLinks.forEach(function(link) {{
     link.addEventListener('click', function(e) {{
@@ -1040,9 +984,7 @@ body::after {{
     }});
   }});
 
-  // Highlight the TOC entry that matches whichever heading is currently
-  // closest to the top of the viewport. IntersectionObserver keeps it
-  // cheap (no scroll listener spam).
+  // Highlight active TOC entry
   var tocMap = {{}};
   tocLinks.forEach(function(link) {{
     tocMap[link.getAttribute('href').slice(1)] = link;
@@ -1062,8 +1004,6 @@ body::after {{
         if (en.isIntersecting) visible.add(en.target.id);
         else visible.delete(en.target.id);
       }});
-      // Pick the visible heading that's furthest down in document order
-      // before the current scroll — i.e. the section we're reading.
       var current = null;
       for (var i = 0; i < headings.length; i++) {{
         if (visible.has(headings[i].id)) {{ current = headings[i].id; break; }}
@@ -1073,7 +1013,7 @@ body::after {{
     headings.forEach(function(h) {{ io.observe(h); }});
   }}
 
-  // Chat about this research — POST to spinoff and redirect to the new chat
+  // Chat about this research
   var chatBtn = document.getElementById('btn-chat-about');
   if (chatBtn) {{
     chatBtn.addEventListener('click', function() {{
@@ -1097,9 +1037,6 @@ body::after {{
         }}
         var url = '/#' + data.session_id;
         var opened = false;
-        // The report typically opens in a new tab — if we have access to the
-        // original Odysseus tab, navigate it and close this report tab so the
-        // user lands directly in the new chat.
         try {{
           if (window.opener && !window.opener.closed) {{
             window.opener.location.href = url;
@@ -1108,16 +1045,13 @@ body::after {{
             opened = true;
             window.close();
           }}
-        }} catch (e) {{ /* cross-origin or detached opener — fall through */ }}
+        }} catch (e) {{ }}
         if (!opened) {{
-          // No opener (report was opened directly via URL) — open the chat in a
-          // new tab so the report stays available.
           var w = window.open(url, '_blank');
           if (w) {{
             chatBtn.disabled = false;
             chatBtn.innerHTML = '<span>Chat opened in new tab</span>';
           }} else {{
-            // Popup blocked — navigate this tab as a last resort.
             window.location.href = url;
             window.location.reload();
           }}
@@ -1157,9 +1091,7 @@ if (document.body.classList.contains('category-comparison')) {{
 def _category_css(category: Optional[str]) -> str:
     if not category:
         return ""
-    # Per-category palette overrides — applied BEFORE the structural rules so
-    # everything that reads --accent / --aurora-* automatically retints. The
-    # default (no category) keeps the warm terracotta defined in :root.
+    # Per-category palette overrides
     palettes = """
 /* ── Category palettes ───────────────────────────────────
    Override the accent + aurora vars per category so each report
@@ -1227,42 +1159,26 @@ body.category-landscape {
   }
 }
 
-/* ── Per-category font pairings ───────────────────────
-   Body font shifts between serif (long-form categories) and sans
-   (practical/data categories) so each report reads as a different
-   publication, not just a re-tinted version of the same template. */
-
-/* Long-form: literary serif for both display and body */
+/* ── Per-category font pairings ─────────────────────── */
 body:not([class*="category-"]),
 body.category-landscape {
   --font-body: 'Source Serif 4', 'Iowan Old Style', Georgia, serif;
 }
-
-/* Comparison: analytical serif display + clean sans body */
 body.category-comparison {
   --font-display: 'Playfair Display', Georgia, serif;
   --font-body: 'Inter', system-ui, sans-serif;
 }
-
-/* How-to: friendly geometric sans, top to bottom */
 body.category-howto {
   --font-display: 'Manrope', system-ui, sans-serif;
   --font-body: 'Inter', system-ui, sans-serif;
 }
-
-/* Product: techy/engineery — IBM Plex Sans display + Inter body */
 body.category-product {
   --font-display: 'IBM Plex Sans', system-ui, sans-serif;
   --font-body: 'Inter', system-ui, sans-serif;
 }
-
-/* Source Serif sits visually larger than Inter at the same px — pull it
-   back one notch for the categories that use it as body so line length
-   and rhythm stay comparable across categories. */
-body:not([class*="category-"]) body, /* no-op selector, kept for clarity */
+body:not([class*="category-"]) body,
 body.category-landscape { font-size: 16.5px; }
 
-/* Drop cap looks bad on geometric sans — kill it for those categories */
 body.category-product   .content > p:first-of-type::first-letter,
 body.category-howto     .content > p:first-of-type::first-letter,
 body.category-comparison .content > p:first-of-type::first-letter,
@@ -1273,11 +1189,7 @@ body.category-comparison .content > h2:first-child + p::first-letter {
   font-family: inherit; font-weight: inherit;
 }
 
-/* ── Per-category background effects ───────────────
-   Each category overrides body::before so the page reads as a
-   distinctly-textured surface. Aurora stays the default. */
-
-/* Product → blueprint grid that slowly pans */
+/* ── Per-category background effects ─────────────── */
 body.category-product::before {
   background:
     linear-gradient(to right, var(--aurora-a) 1px, transparent 1px),
@@ -1290,8 +1202,6 @@ body.category-product::before {
 @keyframes cat-grid-pan {
   to { background-position: 56px 56px, 56px 56px, 0 0; }
 }
-
-/* Comparison → dot grid + slow opacity pulse */
 body.category-comparison::before {
   background:
     radial-gradient(circle, var(--aurora-a) 1.4px, transparent 1.8px),
@@ -1305,11 +1215,6 @@ body.category-comparison::before {
   from { opacity: 0.65; }
   to   { opacity: 1; }
 }
-
-/* How-to → flat surface with a very subtle vignette. Drop the flow-lines
-   pattern — it competes visually with the step number rails on the
-   right-hand side of each H2. The reading should feel like an O'Reilly
-   procedure: clean, scannable, no decoration in the way. */
 body.category-howto::before {
   background:
     radial-gradient(70vw 70vh at 50% 0%, var(--aurora-a) 0%, transparent 60%),
@@ -1317,8 +1222,6 @@ body.category-howto::before {
   filter: blur(40px);
   animation: none;
 }
-
-/* Landscape → horizontal horizon bands that slowly shift sideways */
 body.category-landscape::before {
   background:
     linear-gradient(
@@ -1339,7 +1242,6 @@ body.category-landscape::before {
   0%   { background-position: 0 0; }
   100% { background-position: 0 100%; }
 }
-
 @media (prefers-reduced-motion: reduce) {
   body.category-product::before,
   body.category-comparison::before,
@@ -1349,13 +1251,9 @@ body.category-landscape::before {
   }
 }
 
-/* ─────────────────────────────────────────────────────
-   PER-CATEGORY STRUCTURAL TREATMENTS
-   Each category gets distinctive structural CSS so the page
-   reads as a different publication — not just retinted.
-   ───────────────────────────────────────────────────── */
+/* ── PER-CATEGORY STRUCTURAL TREATMENTS ──────────── */
 
-/* ── HOWTO: O'Reilly-style numbered procedure ─────── */
+/* HOWTO: O'Reilly-style numbered procedure */
 body.category-howto .content { counter-reset: howto-step; }
 body.category-howto .content h2 {
   counter-increment: howto-step;
@@ -1378,7 +1276,6 @@ body.category-howto .content h2::before {
   letter-spacing: 0;
   box-shadow: 0 4px 12px color-mix(in srgb, var(--accent) 30%, transparent);
 }
-/* Step body gets a colored left rail so you can scan "this is step 1's stuff" */
 body.category-howto .content h2 ~ p,
 body.category-howto .content h2 ~ ul,
 body.category-howto .content h2 ~ ol,
@@ -1389,7 +1286,6 @@ body.category-howto .content h2 ~ blockquote {
   margin-left: 4px;
 }
 body.category-howto .content h2:has(+ *) ~ h2 ~ * { border-left: none; padding-left: 0; margin-left: 0; }
-/* Terminal-style code blocks — green $ prompt, monospaced, dark surface */
 body.category-howto .content pre {
   background: #1a1a1e;
   color: #d4e4d4;
@@ -1410,9 +1306,8 @@ body.category-howto .content pre::before {
 }
 body.category-howto .content pre code { color: inherit; }
 
-/* ── LANDSCAPE: editorial briefing with H3 player cards ─ */
+/* LANDSCAPE: editorial briefing with H3 player cards */
 body.category-landscape .content h3 {
-  /* Each H3 in landscape = a "player" in the field — give it a card frame */
   margin-top: 2.5rem;
   padding: 14px 18px 4px;
   border-left: 3px solid var(--accent);
@@ -1429,7 +1324,6 @@ body.category-landscape .content h3 + p {
   margin-left: 0;
   border-radius: 0 0 8px 0;
 }
-/* Pull-quote treatment for any standalone blockquote */
 body.category-landscape .content blockquote {
   font-size: 1.2rem;
   line-height: 1.5;
@@ -1448,9 +1342,9 @@ body.category-landscape .content blockquote::before {
   display: none;
 }
 
-/* ── COMPARISON: lab-report tables with winner badges ─ */
+/* COMPARISON: lab-report tables with winner badges */
 body.category-comparison .content {
-  font-feature-settings: 'tnum' on, 'ss01';  /* tabular numerals for tables */
+  font-feature-settings: 'tnum' on, 'ss01';
 }
 body.category-comparison .content table {
   font-size: 0.92rem;
@@ -1468,7 +1362,6 @@ body.category-comparison .content td:first-child {
   font-weight: 600;
   background: color-mix(in srgb, var(--accent) 6%, transparent);
 }
-/* The first H3 inside a comparison report often names the recommended pick */
 body.category-comparison .content h3:first-of-type::after {
   content: 'Pick';
   display: inline-block;
@@ -1485,9 +1378,8 @@ body.category-comparison .content h3:first-of-type::after {
   vertical-align: middle;
 }
 
-/* ── PRODUCT: spec-sheet cards for each H3 ─────────── */
+/* PRODUCT: spec-sheet cards for each H3 */
 body.category-product .content h3 {
-  /* Each product gets a spec-card frame — bordered, slight bg lift */
   margin-top: 2.4rem;
   padding: 16px 18px;
   border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
@@ -1499,7 +1391,6 @@ body.category-product .content h3 {
   box-shadow: 0 2px 8px rgba(0,0,0,0.04);
 }
 body.category-product .content h3::after {
-  /* small "spec" tag on each product heading */
   content: 'SPEC';
   margin-left: auto;
   font-family: var(--font-body);
@@ -1665,10 +1556,7 @@ body.category-product .content h3 + table {
 }
 """,
     }
-    # Always emit the per-category palette block when ANY category is set —
-    # it contains body.category-X scoped rules so it only re-skins the page
-    # for the matching category. The legacy `styles[category]` block adds
-    # structural CSS specific to that one type.
+    # Always emit the per-category palette block when ANY category is set
     return palettes + styles.get(category, "")
 
 
@@ -1694,7 +1582,7 @@ def _extract_report_title(markdown_text: str, fallback: str):
         return fallback, markdown_text
 
     # Walk through headings (h1 first, then h2 anywhere) and use the first
-    # non-generic one. Track the chosen match so we can strip it from the body.
+    # non-generic one.
     candidates = []
     for level, pattern in ((1, r'^# +(.+?)\s*$'), (2, r'^## +(.+?)\s*$')):
         for m in re.finditer(pattern, markdown_text, re.MULTILINE):
@@ -1723,211 +1611,3 @@ def _is_icon_or_logo_url(url: str) -> bool:
     /icon.png, /logo.svg and /favicon.ico still are.
     """
     return bool(_ICON_LOGO_RE.search(url or ""))
-
-
-def generate_visual_report(
-    question: str,
-    report_markdown: str,
-    sources: Optional[List[Dict]] = None,
-    stats: Optional[Dict] = None,
-    category: Optional[str] = None,
-    session_id: Optional[str] = None,
-    hidden_images: Optional[List[str]] = None,
-) -> str:
-    sources = sources or []
-    stats = stats or {}
-    hidden_images_set = set(hidden_images or [])
-
-    # Strip thinking artifacts
-    report_markdown = strip_thinking(report_markdown)
-
-    # Use the report's first heading as the title (synthesized by the LLM)
-    # rather than the raw user query. Fall back to the query if absent.
-    synthesized, report_markdown = _extract_report_title(report_markdown, question)
-    title_text = synthesized[:120] + ("..." if len(synthesized) > 120 else "")
-
-    # Promote bold-only lines to ## headings if no markdown headings exist
-    if not re.search(r'^#{2,3}\s+', report_markdown, re.MULTILINE):
-        report_markdown = re.sub(
-            r'^\*\*([^*]+)\*\*\s*$',
-            lambda m: f'## {m.group(1).strip()}',
-            report_markdown,
-            flags=re.MULTILINE,
-        )
-
-    report_html = _md_to_html(report_markdown)
-
-    headings = _extract_headings(report_markdown)
-    report_html = _apply_heading_ids(report_html, headings)
-
-    # Collect all OG images from sources (skip icons, tiny images, known junk)
-    _IMAGE_BLOCKLIST = {
-        "cdn.shopify.com/s/files/1/0179/4388/7926/files/icon.png",
-    }
-    _seen_images = set()
-    all_images = []
-    for s in sources:
-        img = s.get("image", "")
-        if (img and img.startswith("https://")
-            and img not in _seen_images
-            and img not in hidden_images_set
-            and not img.endswith((".svg", ".ico", ".gif"))
-            and not any(b in img for b in _IMAGE_BLOCKLIST)
-            and not _is_icon_or_logo_url(img)):
-            _seen_images.add(img)
-            all_images.append(img)
-
-    # Hero image = first available. data-img-url drives the per-image hide
-    # button rendered by the script at the bottom of the page.
-    hero_image_html = ""
-    if all_images:
-        hero_url = html.escape(all_images[0])
-        hero_image_html = (
-            f'<div class="hero-image" data-img-url="{hero_url}">'
-            f'<img src="{hero_url}" alt="" loading="lazy" '
-            f'onerror="this.parentElement.style.display=\'none\'">'
-            f'{_IMG_OVERLAY_BTNS}'
-            f'</div>'
-        )
-
-    # Product quick-links bar
-    if category == "product" and headings:
-        product_headings = [h for h in headings if h["level"] == 3]
-        if product_headings:
-            pills = " ".join(
-                f'<a href="#{h["slug"]}" class="quick-link">{html.escape(h["text"][:40])}</a>'
-                for h in product_headings
-            )
-            report_html = f'<div class="quick-links-bar">{pills}</div>\n' + report_html
-
-    # Inject remaining images between sections. Whatever isn't placed (hero
-    # took [0], sections took the next `consumed`) becomes the spare pool the
-    # reroll button draws from to swap out an irrelevant image in-page.
-    section_pool = all_images[1:]
-    report_html, _consumed = _inject_images(report_html, section_pool)
-    spare_images = section_pool[_consumed:]
-
-    # Build TOC
-    toc_lines = []
-    for h in headings:
-        depth_class = f"depth-{h['level']}"
-        toc_lines.append(
-            f'<a href="#{h["slug"]}" class="{depth_class}">{html.escape(h["text"])}</a>'
-        )
-    toc_html = "\n      ".join(toc_lines) if toc_lines else ""
-
-    # Build stats bar
-    stat_items = []
-    for key, label in [("Duration", "Duration"), ("Rounds", "Rounds"), ("Queries", "Queries"), ("URLs", "URLs Analyzed"), ("Model", "Model"), ("Search", "Search")]:
-        val = stats.get(key)
-        if val is not None:
-            stat_items.append(
-                f'<div class="stat"><span class="stat-value">{html.escape(str(val))}</span> {html.escape(label)}</div>'
-            )
-    stats_html = "\n  ".join(stat_items)
-
-    # Build sources panel — compact collapsible list
-    sources_html = ""
-    if sources:
-        items = []
-        for i, s in enumerate(sources, 1):
-            url = s.get("url", "")
-            title = html.escape(s.get("title", "") or url)
-            domain = ""
-            try:
-                domain = urlparse(url).hostname or ""
-                if domain.startswith("www."):
-                    domain = domain[4:]
-            except Exception:
-                domain = url
-            items.append(
-                f'<a href="{html.escape(url)}" target="_blank" rel="noopener noreferrer">'
-                f'<span class="snum">{i}.</span>'
-                f'<span>{title}</span>'
-                f'<span class="sdomain">{html.escape(domain)}</span>'
-                f'</a>'
-            )
-        sources_html = (
-            '<div class="sources-panel">\n'
-            '<details>\n'
-            f'<summary>Sources ({len(sources)})</summary>\n'
-            '<div class="sources-list">\n'
-            + "\n".join(items)
-            + "\n</div>\n</details>\n</div>"
-        )
-
-    timestamp = datetime.now().strftime("%B %d, %Y at %H:%M")
-
-    # Build description for OG/meta tags (first 160 chars of plain text)
-    desc_text = re.sub(r'[#*_\[\]()]', '', report_markdown)[:160].strip()
-    og_image_meta = ""
-    if all_images:
-        og_image_meta = f'<meta property="og:image" content="{html.escape(all_images[0])}">'
-
-    chat_cta_html = ""
-    if session_id:
-        chat_cta_html = (
-            '<div class="chat-cta">'
-            '<button id="btn-chat-about" class="chat-cta-btn" '
-            f'data-research-id="{html.escape(session_id)}">'
-            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
-            'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" '
-            'width="18" height="18">'
-            '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>'
-            '</svg>'
-            '<span>Discuss</span>'
-            '</button>'
-            '<div class="chat-cta-hint">Opens a new chat with this report as context.</div>'
-            '</div>'
-        )
-
-    # "Restore hidden images" toolbar button — only render if there are any
-    # hidden images on this research AND we have a session_id (needed for
-    # the POST endpoint).
-    restore_btn_html = ""
-    if session_id and hidden_images_set:
-        restore_btn_html = (
-            '<button id="btn-restore-images" type="button" '
-            f'title="Restore {len(hidden_images_set)} hidden image'
-            f'{"" if len(hidden_images_set) == 1 else "s"}">'
-            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
-            'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
-            '<path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>'
-            '</svg>'
-            f'Show hidden ({len(hidden_images_set)})'
-            '</button>'
-        )
-
-    return _TEMPLATE.format(
-        title=html.escape(title_text),
-        description=html.escape(desc_text),
-        og_image_meta=og_image_meta,
-        question_html=html.escape(synthesized),
-        hero_image_html=hero_image_html,
-        stats_html=stats_html,
-        toc_html=toc_html,
-        report_html=report_html,
-        sources_html=sources_html,
-        chat_cta_html=chat_cta_html,
-        restore_btn_html=restore_btn_html,
-        timestamp=timestamp,
-        category_css=_category_css(category),
-        body_class=f"category-{html.escape(str(category))}" if category else "",
-        session_id_js=json_dumps_str(session_id or ""),
-        spare_images_js=_json_for_script(spare_images),
-    )
-
-
-def _json_for_script(value) -> str:
-    """JSON-encode a value safe to embed inside a <script> block.
-
-    json.dumps doesn't escape '/', so a string containing the literal
-    substring '</script>' would terminate the script element early.
-    Escape the closing slash to keep the inline JSON inert as HTML.
-    """
-    return json.dumps(value).replace("</", "<\\/")
-
-
-def json_dumps_str(s: str) -> str:
-    """JSON-encode a string so it's safe to embed inside a <script> block."""
-    return _json_for_script(s)

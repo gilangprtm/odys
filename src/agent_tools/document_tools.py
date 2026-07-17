@@ -726,7 +726,7 @@ class ManageDocumentTool:
             if not ts:
                 return 'never'
             try:
-                now = datetime.now(timezone.utc) if ts.tzinfo is not None else datetime.utcnow()
+                now = datetime.now(timezone.utc) if ts.tzinfo is not None else datetime.now(timezone.utc).replace(tzinfo=None)
                 diff = (now - ts).total_seconds()
             except Exception:
                 return 'unknown'

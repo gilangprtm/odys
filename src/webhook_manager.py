@@ -40,7 +40,7 @@ _PRIVATE_NETWORKS = [
 
 
 def _utcnow() -> datetime:
-    """Return naive UTC for existing DB columns while avoiding datetime.utcnow()."""
+    """Return naive UTC for existing DB columns while avoiding datetime.now(timezone.utc).replace(tzinfo=None)."""
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 

@@ -306,8 +306,8 @@ def _sync_blocking(owner: str, url: str, username: str, password: str, account_i
                 result["errors"].append(f"No calendars and URL fallback failed: {e}")
                 return result      # outer finally will call client.close()
 
-        start = datetime.utcnow() - timedelta(days=_LOOKBACK_DAYS)
-        end = datetime.utcnow() + timedelta(days=_LOOKAHEAD_DAYS)
+        start = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=_LOOKBACK_DAYS)
+        end = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=_LOOKAHEAD_DAYS)
 
         db = SessionLocal()        # if this raises, outer finally still calls client.close()
         try:

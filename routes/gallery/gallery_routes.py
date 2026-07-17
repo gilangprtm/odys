@@ -1009,10 +1009,9 @@ def setup_gallery_routes() -> APIRouter:
                 for m in msgs:
                     if not m.meta_data:
                         continue
-                    try:
-                        meta = _json.loads(m.meta_data)
-                    except Exception:
+                    if not isinstance(m.meta_data, dict):
                         continue
+                    meta = m.meta_data
                     events = meta.get("tool_events") or []
                     new_events = []
                     removed_any = False
@@ -1045,9 +1044,8 @@ def setup_gallery_routes() -> APIRouter:
                             .first()
                         )
                         if prev and prev.role == "user":
-                            prev_meta = {}
                             try:
-                                prev_meta = _json.loads(prev.meta_data) if prev.meta_data else {}
+                                prev_meta = (prev.meta_data or {}) if isinstance(prev.meta_data, dict) else {}
                             except Exception:
                                 prev_meta = {}
                             # Only purge the prompt if it has no tool
@@ -1057,7 +1055,7 @@ def setup_gallery_routes() -> APIRouter:
                                 rows_to_delete.append(prev)
                     else:
                         meta["tool_events"] = new_events
-                        m.meta_data = _json.dumps(meta)
+                        m.meta_data = meta
                 for m in rows_to_delete:
                     db.delete(m)
                 if msgs:

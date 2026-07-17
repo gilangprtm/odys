@@ -23,7 +23,7 @@ async def _run_scheduled_serve(tmp_path, monkeypatch, server):
         json.dumps({"env": {"servers": [server]}}),
         encoding="utf-8",
     )
-    monkeypatch.setattr(builtin_actions, "COOKBOOK_STATE_FILE", str(state_path))
+    monkeypatch.setattr(builtin_actions.actions, "COOKBOOK_STATE_FILE", str(state_path))
     monkeypatch.setattr(httpx.AsyncClient, "post", _fake_post)
 
     message, ok = await builtin_actions.action_cookbook_serve(

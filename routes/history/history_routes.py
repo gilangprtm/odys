@@ -127,10 +127,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
         entry = {"role": m.role, "content": _history_display_content(m.content)}
         meta = {}
         if m.meta_data:
-            try:
-                meta = json.loads(m.meta_data) or {}
-            except (json.JSONDecodeError, ValueError):
-                meta = {}
+            meta = (m.meta_data or {}) if isinstance(m.meta_data, dict) else {}
         if m.timestamp and "timestamp" not in meta:
             meta["timestamp"] = m.timestamp.isoformat() + "Z"
         if meta:
@@ -368,12 +365,9 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                     raise HTTPException(404, "Message not found")
 
                 db_msg.content = content
-                meta = {}
-                if db_msg.meta_data:
-                    try: meta = json.loads(db_msg.meta_data)
-                    except (json.JSONDecodeError, ValueError): pass
+                meta = (db_msg.meta_data or {}) if isinstance(db_msg.meta_data, dict) else {}
                 meta['edited'] = True
-                db_msg.meta_data = json.dumps(meta)
+                db_msg.meta_data = meta
 
                 # Update in-memory history by matching _db_id
                 for hmsg in session.history:
@@ -433,16 +427,11 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                     .first()
                 )
                 if db_messages:
-                    meta = {}
-                    if db_messages.meta_data:
-                        try:
-                            meta = _json.loads(db_messages.meta_data)
-                        except (json.JSONDecodeError, ValueError):
-                            pass
+                    meta = (db_messages.meta_data or {}) if isinstance(db_messages.meta_data, dict) else {}
                     meta['stopped'] = True
                     if not meta.get('model'):
                         meta['model'] = session.model
-                    db_messages.meta_data = _json.dumps(meta)
+                    db_messages.meta_data = meta
                     db.commit()
             finally:
                 db.close()
@@ -488,12 +477,9 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                     .first()
                 )
                 if db_msg:
-                    meta = {}
-                    if db_msg.meta_data:
-                        try: meta = _json.loads(db_msg.meta_data)
-                        except (json.JSONDecodeError, ValueError): pass
+                    meta = (db_msg.meta_data or {}) if isinstance(db_msg.meta_data, dict) else {}
                     meta.update(meta_update)
-                    db_msg.meta_data = _json.dumps(meta)
+                    db_msg.meta_data = meta
                     db.commit()
             finally:
                 db.close()
@@ -752,7 +738,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                     session_id=session_id,
                     role="system",
                     content=system_summary.content,
-                    meta_data=_json.dumps(system_summary.metadata),
+                    meta_data=system_summary.metadata,
                     timestamp=now,
                 )
                 db.add(db_sys_summary)
@@ -761,7 +747,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                     session_id=session_id,
                     role="assistant",
                     content=summary_msg.content,
-                    meta_data=_json.dumps(summary_msg.metadata),
+                    meta_data=summary_msg.metadata,
                     timestamp=now,
                 )
                 db.add(db_summary)

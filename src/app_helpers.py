@@ -7,7 +7,28 @@ from fastapi import HTTPException
 from fastapi.responses import HTMLResponse
 from starlette.requests import Request
 
+from core.constants import APP_VERSION
+
 logger = logging.getLogger(__name__)
+
+_TEMPLATES_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "static", "templates")
+)
+
+
+def _read_include(path: str) -> str:
+    """Read a partial template, allowing only files under static/templates/."""
+    # Strip leading slash for join
+    rel = path.lstrip("/")
+    full = os.path.realpath(os.path.join(_TEMPLATES_DIR, rel))
+    if not full.startswith(os.path.realpath(_TEMPLATES_DIR) + os.sep):
+        logger.warning("Blocked include path escape: %s", path)
+        return f"<!-- blocked: {path} -->"
+    if not os.path.isfile(full):
+        logger.warning("Include not found: %s", full)
+        return f"<!-- not found: {path} -->"
+    with open(full, "r", encoding="utf-8") as f:
+        return f.read()
 
 def read_if_exists(path: str) -> str:
     """Read file if it exists, return empty string otherwise."""
@@ -46,6 +67,14 @@ def serve_html_with_nonce(request: Request, file_path: str) -> HTMLResponse:
         raise HTTPException(500, "Internal server error")
     nonce = getattr(request.state, "csp_nonce", "")
     html = html.replace("{{CSP_NONCE}}", nonce)
+    html = html.replace("{{APP_VERSION}}", APP_VERSION)
+    # Inline partial include pattern: <include path="/static/templates/head.html" />
+    import re
+    html = re.sub(
+        r'<include\s+path="([^"]+)"\s*/>',
+        lambda m: _read_include(m.group(1)),
+        html,
+    )
     return HTMLResponse(html)
 
 

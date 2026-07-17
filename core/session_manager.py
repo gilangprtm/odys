@@ -145,7 +145,7 @@ class SessionManager:
         # Try relationship first, then direct query
         if db_session.messages:
             for db_msg in db_session.messages:
-                meta = json.loads(db_msg.meta_data) if db_msg.meta_data else {}
+                meta = (db_msg.meta_data or {}) if db_msg.meta_data else {}
                 if meta is None: meta = {}
                 meta['_db_id'] = db_msg.id
                 meta.setdefault('timestamp', _message_timestamp_iso(db_msg.timestamp))
@@ -160,7 +160,7 @@ class SessionManager:
             ).order_by(DbChatMessage.timestamp).all()
 
             for db_msg in db_messages:
-                meta = json.loads(db_msg.meta_data) if db_msg.meta_data else {}
+                meta = (db_msg.meta_data or {}) if db_msg.meta_data else {}
                 if meta is None: meta = {}
                 meta['_db_id'] = db_msg.id
                 meta.setdefault('timestamp', _message_timestamp_iso(db_msg.timestamp))
@@ -245,7 +245,7 @@ class SessionManager:
                 )
 
             msg_id = str(uuid.uuid4())
-            msg_time = datetime.utcnow()
+            msg_time = datetime.now(timezone.utc).replace(tzinfo=None)
             if message.metadata is None:
                 message.metadata = {}
             message.metadata.setdefault('timestamp', _message_timestamp_iso(msg_time))
@@ -258,7 +258,7 @@ class SessionManager:
                 session_id=session_id,
                 role=message.role,
                 content=_content,
-                meta_data=json.dumps(message.metadata) if message.metadata else None,
+                meta_data=message.metadata if message.metadata else None,
                 timestamp=msg_time,
             )
             db.add(db_message)
@@ -367,7 +367,7 @@ class SessionManager:
                     # Mirrors _persist_message: keep raw media bytes out of the
                     # persisted transcript and search index.
                     content=persistable_message_content(message.content, message.metadata),
-                    meta_data=json.dumps(message.metadata) if message.metadata else None,
+                    meta_data=message.metadata if message.metadata else None,
                     timestamp=now + timedelta(microseconds=i),
                 )
                 db.add(db_message)

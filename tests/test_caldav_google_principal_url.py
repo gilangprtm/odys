@@ -16,7 +16,7 @@ Google account is required.
 import sys
 import tempfile
 import types
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 
 import pytest
 from sqlalchemy import create_engine
@@ -42,7 +42,7 @@ _GOOGLE_EVENTS = "https://apidata.googleusercontent.com/caldav/v2/me@gmail.com/e
 
 def _ics_one_event():
     # An event inside the sync window (now-90d .. now+365d).
-    dt = datetime.utcnow() + timedelta(days=2)
+    dt = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=2)
     stamp = dt.strftime("%Y%m%dT%H%M%SZ")
     return (
         "BEGIN:VCALENDAR\r\n"

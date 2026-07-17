@@ -38,6 +38,16 @@ logs/
 node_modules/
 services/node_modules/
 services/data/
+frontend/node_modules/
+frontend/dist/
+static/app/
+
+# Hermes internal dev notes
+.hermes/
+
+# Impeccable — ephemeral runtime (keep PRODUCT.md / DESIGN.md)
+.impeccable/
+!.impeccable/config.json
 
 # IDE / Editor
 .aider*
@@ -54,6 +64,10 @@ services/data/
 # OS
 .DS_Store
 Thumbs.db
+
+# Backup/temp artifacts
+*.bak
+*.orig
 
 # Build artifacts
 *.cache

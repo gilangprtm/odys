@@ -33,7 +33,7 @@ def test_empty_or_unparseable_scores_zero():
 
 def test_default_now_is_naive_utc():
     # Naive (no tzinfo) so it subtracts cleanly from the naive parsed dates,
-    # and UTC-based (3.14-safe, no datetime.utcnow()).
+    # and UTC-based (3.14-safe, no datetime.now(timezone.utc).replace(tzinfo=None)).
     now = _utcnow_naive()
     assert now.tzinfo is None
     reference = datetime.now(timezone.utc).replace(tzinfo=None)
