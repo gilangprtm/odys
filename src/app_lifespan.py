@@ -205,6 +205,22 @@ async def _startup_event(app, **c):
 
     await _ensure_default_tasks()
 
+    # Neuron natural boot: vault sync + project seed + memory import + decay
+    # Runs silently in background; no-op if vault missing or neuron unavailable.
+    async def _neuron_boot():
+        try:
+            from services.odys_neuron_hooks import natural_boot
+            result = await asyncio.to_thread(natural_boot)
+            actions = result.get("actions", [])
+            if actions:
+                logger.info(f"Neuron natural boot: {', '.join(actions)}")
+            else:
+                logger.debug("Neuron natural boot: nothing to do")
+        except Exception as e:
+            logger.debug(f"Neuron natural boot skipped: {e}")
+
+    _startup_tasks.append(asyncio.create_task(_neuron_boot()))
+
     # Skill owner backfill
     try:
         from core.constants import AUTH_FILE
