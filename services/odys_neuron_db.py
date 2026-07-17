@@ -54,6 +54,7 @@ def init_db() -> None:
                 ref TEXT NOT NULL DEFAULT '',
                 base_weight REAL NOT NULL DEFAULT 0.5,
                 tokens TEXT NOT NULL DEFAULT '[]',
+                embedding BLOB,
                 created_at TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL DEFAULT '',
                 last_activated_at TEXT,
@@ -135,14 +136,23 @@ def migrate_from_json() -> dict[str, Any]:
 
 def load_all() -> tuple[dict[str, dict], dict[str, dict]]:
     """Load all nodes and edges. Returns (nodes_dict, edges_dict)."""
+    import numpy as np
     with _connect() as conn:
         rows = conn.execute("SELECT * FROM nodes").fetchall()
         nodes = {}
         for r in rows:
+            emb_blob = r["embedding"]
+            emb = None
+            if emb_blob is not None:
+                try:
+                    emb = np.frombuffer(emb_blob, dtype="float32").tolist()
+                except Exception:
+                    emb = None
             nodes[r["id"]] = {
                 "id": r["id"], "type": r["type"], "label": r["label"],
                 "ref": r["ref"], "base_weight": r["base_weight"],
                 "tokens": json.loads(r["tokens"]),
+                "embedding": emb,
                 "created_at": r["created_at"], "updated_at": r["updated_at"],
                 "last_activated_at": r["last_activated_at"],
                 "archived": bool(r["archived"]),
@@ -162,20 +172,28 @@ def load_all() -> tuple[dict[str, dict], dict[str, dict]]:
 
 def save_all(nodes: dict[str, dict], edges: dict[str, dict]) -> None:
     """Atomic save of all nodes + edges."""
+    import numpy as np
     with _lock:
         with _connect() as conn:
             conn.execute("DELETE FROM nodes")
             conn.execute("DELETE FROM edges")
-            conn.executemany(
-                """INSERT INTO nodes
-                   (id, type, label, ref, base_weight, tokens, created_at, updated_at, last_activated_at, archived)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                [(nid, n["type"], n["label"], n["ref"], n["base_weight"],
-                  json.dumps(n.get("tokens") or []), n.get("created_at", ""),
-                  n.get("updated_at", ""), n.get("last_activated_at"),
-                  1 if n.get("archived") else 0)
-                 for nid, n in nodes.items()],
-            )
+            for nid, n in nodes.items():
+                emb_blob = None
+                emb = n.get("embedding")
+                if emb is not None:
+                    try:
+                        emb_blob = np.array(emb, dtype="float32").tobytes()
+                    except Exception:
+                        emb_blob = None
+                conn.execute(
+                    """INSERT INTO nodes
+                       (id, type, label, ref, base_weight, tokens, embedding, created_at, updated_at, last_activated_at, archived)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (nid, n["type"], n["label"], n["ref"], n["base_weight"],
+                     json.dumps(n.get("tokens") or []), emb_blob,
+                     n.get("created_at", ""), n.get("updated_at", ""),
+                     n.get("last_activated_at"), 1 if n.get("archived") else 0),
+                )
             conn.executemany(
                 """INSERT INTO edges (key, source, target, weight, count, last_seen)
                    VALUES (?, ?, ?, ?, ?, ?)""",

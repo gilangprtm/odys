@@ -53,8 +53,8 @@ class NeuronNode:
     label: str
     ref: str
     base_weight: float = 0.5
-    # Bag-of-words tokens for lightweight similarity (no embed model required in Phase 1)
     tokens: list[str] = field(default_factory=list)
+    embedding: list[float] | None = None  # vector embedding (384-dim for bge-small-en-v1.5)
     created_at: str = ""
     updated_at: str = ""
     last_activated_at: str | None = None
@@ -72,6 +72,7 @@ class NeuronNode:
             ref=d.get("ref", ""),
             base_weight=float(d.get("base_weight", 0.5)),
             tokens=list(d.get("tokens") or []),
+            embedding=d.get("embedding"),
             created_at=d.get("created_at") or "",
             updated_at=d.get("updated_at") or "",
             last_activated_at=d.get("last_activated_at"),
@@ -273,14 +274,36 @@ class NeuronGraph:
         text: str | None = None,
     ) -> NeuronNode:
         self.load()
+        from services.odys_neuron_embed import get_embedder
+        emb_client = get_embedder()
+        full_text = text or label or ""
+
         # upsert by type+ref
         for n in self.nodes.values():
             if n.type == type and n.ref == ref and not n.archived:
-                n.label = label or n.label
-                n.base_weight = max(n.base_weight, base_weight)
-                n.tokens = _tokenize(text or label) or n.tokens
-                n.updated_at = _now()
-                self.save()
+                changed = False
+                if label and n.label != label:
+                    n.label = label
+                    changed = True
+                if base_weight > n.base_weight:
+                    n.base_weight = base_weight
+                    changed = True
+                if full_text:
+                    new_tokens = _tokenize(full_text)
+                    if new_tokens != n.tokens:
+                        n.tokens = new_tokens
+                        # compute embedding in background thread so add_node stays fast
+                        import threading
+                        def _update_emb(node, t):
+                            e = emb_client.embed_single(t)
+                            if e is not None and e.size > 0:
+                                node.embedding = e.tolist()
+                                self.save()
+                        threading.Thread(target=_update_emb, args=(n, full_text), daemon=True).start()
+                        changed = True
+                if changed:
+                    n.updated_at = _now()
+                    self.save()
                 return n
 
         nid = node_id or str(uuid.uuid4())[:12]
@@ -291,11 +314,22 @@ class NeuronGraph:
             label=label,
             ref=ref,
             base_weight=min(max(base_weight, 0.0), 1.0),
-            tokens=_tokenize(text or label),
+            tokens=_tokenize(full_text),
             created_at=now,
             updated_at=now,
         )
         self.nodes[nid] = node
+
+        # Initial embedding (background)
+        if full_text:
+            import threading
+            def _set_emb(n, t):
+                e = emb_client.embed_single(t)
+                if e is not None and e.size > 0:
+                    n.embedding = e.tolist()
+                    self.save()
+            threading.Thread(target=_set_emb, args=(node, full_text), daemon=True).start()
+
         self.save()
         return node
 
@@ -411,7 +445,7 @@ class NeuronGraph:
         node_ids: list[str] | None = None,
         top_k: int = 10,
     ) -> dict[str, Any]:
-        """Return top-K active nodes with scores + explanation."""
+        """Return top-K active nodes with scores + explanation (using vector embeddings)."""
         self.load()
         active_nodes = [n for n in self.nodes.values() if not n.archived]
         if not active_nodes:
@@ -434,12 +468,24 @@ class NeuronGraph:
         else:
             seeds = set()
 
-        q_tokens = set(_tokenize(query)) if query else set()
+        # Compute query embedding and similarities
+        vector_scores: dict[str, float] = {}
+        if query.strip():
+            try:
+                from services.odys_neuron_embed import get_embedder, cosine_similarity_single
+                import numpy as np
+                emb_client = get_embedder()
+                q_vec = emb_client.embed_single(query)
+                node_embs = {}
+                for n in active_nodes:
+                    if n.embedding:
+                        node_embs[n.id] = np.array(n.embedding, dtype="float32")
+                if node_embs:
+                    vector_scores = cosine_similarity_single(q_vec, node_embs)
+            except Exception as e:
+                logger.debug("vector similarity failed, falling back to tokens: %s", e)
 
-        # TF-IDF similarity (preferred) or fallback to Jaccard
-        tfidf_scores: dict[str, float] = {}
-        if query and _HAS_SKLEARN:
-            tfidf_scores = _tfidf.query_similarity(query, self.nodes)
+        q_tokens = set(_tokenize(query)) if query else set()
 
         # adjacency for spread
         adj: dict[str, list[tuple[str, float]]] = {n.id: [] for n in active_nodes}
@@ -450,36 +496,41 @@ class NeuronGraph:
 
         scored: list[dict[str, Any]] = []
         for n in active_nodes:
-            # TF-IDF cosine similarity (preferred) or Jaccard fallback
-            if tfidf_scores:
-                sim = tfidf_scores.get(n.id, 0.0)
+            # Vector cosine similarity preferred, fallback to token-based Jaccard
+            if query:
+                if n.id in vector_scores:
+                    sim = vector_scores[n.id]
+                else:
+                    # token-based fallback
+                    n_set = set(n.tokens)
+                    sim = _token_sim(q_tokens, n_set) if q_tokens else 0.0
             else:
-                n_set = set(n.tokens)
-                sim = _token_sim(q_tokens, n_set) if q_tokens else 0.0
+                sim = 0.0
+
             if seeds and n.id in seeds:
                 sim = max(sim, 0.8)
 
-            if sim < COSINE_MIN and n.id not in seeds and not q_tokens:
-                # pure structural: base only if no query
+            if sim < COSINE_MIN and n.id not in seeds and not query:
                 sim = 0.0
 
-            # spread from neighbors that are similar
+            # spread from neighbors
             spread = 0.0
             if adj.get(n.id):
                 for nb_id, w in adj[n.id]:
                     nb_node = self.nodes.get(nb_id)
                     if not nb_node or nb_node.archived:
                         continue
-                    # TF-IDF or Jaccard for neighbor similarity
-                    if tfidf_scores:
-                        nb_sim = tfidf_scores.get(nb_id, 0.0)
+                    if query:
+                        if nb_id in vector_scores:
+                            nb_sim = vector_scores[nb_id]
+                        else:
+                            nb_sim = _token_sim(q_tokens, set(nb_node.tokens)) if q_tokens else 0.0
                     else:
-                        nb_sim = _token_sim(q_tokens, set(nb_node.tokens)) if q_tokens else 0.0
+                        nb_sim = 0.0
                     if nb_id in seeds:
                         nb_sim = max(nb_sim, 0.6)
                     if nb_sim >= COSINE_MIN or nb_id in seeds:
                         spread += w * max(nb_sim, 0.3)
-                # normalize rough
                 spread = min(spread / max(len(adj[n.id]), 1), 1.0)
 
             if sim < COSINE_MIN and spread < 0.05 and n.id not in seeds:
@@ -505,7 +556,7 @@ class NeuronGraph:
         scored.sort(key=lambda x: x["score"], reverse=True)
         top = scored[: max(1, min(top_k, 50))]
 
-        # mark last_activated on top results (soft — no strengthen yet)
+        # mark last_activated
         now = _now()
         for r in top:
             node = self.nodes.get(r["id"])
