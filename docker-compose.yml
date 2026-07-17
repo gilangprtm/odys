@@ -30,6 +30,9 @@ services:
       - ODYSSEUS_SCRIPT_HOST=localhost
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
+      # Cross-platform paths (set via Coolify env vars)
+      - ODYS_VAULT_PATH=${ODYS_VAULT_PATH:-/app/data/vault}
+      - ODYS_PROJECTS_PATH=${ODYS_PROJECTS_PATH:-/app/data/projects}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:7000/api/health"]
       interval: 30s

@@ -149,7 +149,7 @@ Knowledge base for Odys. Start here.
 ## Sections
 
 - [[journal]] — daily digests
-- Projects tracked via Odys Projects (scan `D:/Project` or workspace)
+- Projects tracked via Odys Projects
 
 ## How to add notes
 

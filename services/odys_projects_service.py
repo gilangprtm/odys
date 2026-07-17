@@ -16,7 +16,13 @@ from typing import Any
 
 # ── Konfigurasi ─────────────────────────────────────────
 
-DEFAULT_PROJECTS_ROOT = Path("D:/Project")
+def get_projects_root() -> Path:
+    env = os.environ.get("ODY_PROJECTS_PATH") or os.environ.get("ODYS_PROJECTS_PATH")
+    if env:
+        return Path(env).expanduser()
+    return Path("D:/Project")
+
+DEFAULT_PROJECTS_ROOT = get_projects_root()
 DATA_DIR = Path("data/odys_projects")
 PROJECTS_INDEX_FILE = DATA_DIR / "projects_index.json"
 
