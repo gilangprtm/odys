@@ -37,6 +37,8 @@ from src.agent_tools import (
 _cached_base_prompt = None
 _cached_base_prompt_key = None
 
+from src.agent_loop.tool_runner import _build_base_prompt
+
 from src.agent_loop.prompts import (
     TOOL_SECTIONS,
     get_builtin_overrides,
