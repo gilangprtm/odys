@@ -459,6 +459,9 @@ def natural_boot(*, force_sync: bool = False, force_decay: bool = False) -> dict
 
     # 2) project seed
     try:
+        # Ensure projects root exists (creates directory if missing)
+        from services.odys_projects_service import ensure_projects_root
+        ensure_projects_root()
         sp = seed_projects_from_index()
         out["project_seed"] = sp
         if sp.get("seeded"):

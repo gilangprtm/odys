@@ -16,6 +16,30 @@ from typing import Any
 
 # ── Konfigurasi ─────────────────────────────────────────
 
+def ensure_projects_root(root: Path | None = None) -> dict[str, Any]:
+    """Create projects root directory and index if missing. Idempotent.
+    Returns dict: {ok, path, created: bool, message}
+    """
+    root = (root or get_projects_root()).expanduser().resolve()
+    created = False
+    if not root.is_dir():
+        root.mkdir(parents=True, exist_ok=True)
+        created = True
+    # Ensure index file exists
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if not PROJECTS_INDEX_FILE.exists():
+        _save_index({})
+    message = f"Projects root ready at {root}"
+    if created:
+        message += " (newly created)"
+    return {
+        "ok": True,
+        "path": str(root),
+        "created": created,
+        "message": message,
+    }
+
+
 def get_projects_root() -> Path:
     env = os.environ.get("ODY_PROJECTS_PATH") or os.environ.get("ODYS_PROJECTS_PATH")
     if env:
