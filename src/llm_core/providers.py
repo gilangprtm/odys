@@ -331,7 +331,22 @@ async def llm_call_async(
                 raise HTTPException(r.status_code, friendly)
             logger.info(f"LLM async call to {target_url} succeeded in {duration:.2f}s (attempt {attempt})")
             _clear_host_dead(target_url)
-            data = r.json()
+            # Handle potential "Extra data" in response (malformed JSON with trailing garbage)
+            try:
+                data = r.json()
+            except json.JSONDecodeError as e:
+                # Try to extract first valid JSON object
+                import re
+                text = r.text.strip()
+                # Find first complete JSON object
+                match = re.search(r'\{.*\}', text, re.DOTALL)
+                if match:
+                    try:
+                        data = json.loads(match.group(0))
+                    except json.JSONDecodeError:
+                        raise HTTPException(502, f"Upstream {target_url} returned invalid JSON: {e}, text: {text[:500]}")
+                else:
+                    raise HTTPException(502, f"Upstream {target_url} returned non-JSON: {text[:500]}")
             try:
                 if provider == "anthropic":
                     response = _parse_anthropic_response(data)
