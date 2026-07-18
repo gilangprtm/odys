@@ -195,7 +195,9 @@ def setup_chat_routes(
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(400, f"Request parsing error: {e}")
+            import traceback
+            tb = traceback.format_exc()
+            raise HTTPException(500, f"Request parsing error: {e}\n{tb}")
 
         _set_user_time_from_request(request)
 
