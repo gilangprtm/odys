@@ -28,12 +28,14 @@ from src.agent_tools import (
     format_tool_result,
     set_active_document,
     set_active_model,
-    function_call_to_tool_block,
     FUNCTION_TOOL_SCHEMAS,
     TOOL_TAGS,
     ToolBlock,
     MAX_AGENT_ROUNDS,
 )
+
+_cached_base_prompt = None
+_cached_base_prompt_key = None
 
 from src.agent_loop.prompts import (
     TOOL_SECTIONS,
