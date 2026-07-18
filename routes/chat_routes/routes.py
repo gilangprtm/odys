@@ -92,93 +92,98 @@ def setup_chat_routes(
         preset_id = chat_request.preset_id
 
         # Verify the caller owns this session before loading it.
-        _verify_session_owner(request, session)
-
         try:
-            sess = session_manager.get_session(session)
-        except KeyError:
-            raise HTTPException(404, f"Session '{session}' not found")
-        owner = effective_user(request)
-        if _clear_orphaned_session_endpoint(sess, owner=owner):
-            raise HTTPException(400, "Selected model endpoint was removed. Pick another model in Settings.")
+            _verify_session_owner(request, session)
 
-        _recover_empty_session_model(sess, session, owner=owner)
-        if not getattr(sess, "model", "").strip():
-            raise HTTPException(
-                400,
-                "No model selected for this chat. Open the model picker and choose one before sending.",
+            try:
+                sess = session_manager.get_session(session)
+            except KeyError:
+                raise HTTPException(404, f"Session '{session}' not found")
+            owner = effective_user(request)
+            if _clear_orphaned_session_endpoint(sess, owner=owner):
+                raise HTTPException(400, "Selected model endpoint was removed. Pick another model in Settings.")
+
+            _recover_empty_session_model(sess, session, owner=owner)
+            if not getattr(sess, "model", "").strip():
+                raise HTTPException(
+                    400,
+                    "No model selected for this chat. Open the model picker and choose one before sending.",
+                )
+
+            _enforce_chat_privileges(request, sess)
+
+            tool_policy = build_effective_tool_policy(last_user_message=message)
+            allow_tool_preprocessing = not tool_policy.block_all_tool_calls
+
+            # Inline memory command
+            memory_response = None
+            if not tool_policy.blocks("manage_memory"):
+                memory_response = await chat_handler.handle_memory_command(sess, message)
+            if memory_response:
+                return {"response": memory_response}
+
+            # Build shared context
+            ctx = await build_chat_context(
+                sess, request, chat_handler, chat_processor,
+                message=message,
+                session_id=session,
+                preset_id=preset_id,
+                att_ids=att_ids,
+                use_web=use_web,
+                time_filter=time_filter,
+                webhook_manager=webhook_manager,
+                allow_tool_preprocessing=allow_tool_preprocessing,
             )
 
-        _enforce_chat_privileges(request, sess)
+            # Research injection
+            research_blocked_by_policy = (
+                tool_policy.blocks("trigger_research")
+                or tool_policy.blocks("manage_research")
+            )
+            if use_research and not research_blocked_by_policy:
+                try:
+                    _r_ep, _r_model, _r_headers = _resolve_research_endpoint(sess)
+                    research_ctx = await research_handler.call_research_service(
+                        message, _r_ep, _r_model, llm_headers=_r_headers
+                    )
+                    ctx.messages.insert(
+                        len(ctx.preface),
+                        untrusted_context_message("research context", research_ctx),
+                    )
+                except Exception as e:
+                    logger.error(f"Research failed: {e}")
 
-        tool_policy = build_effective_tool_policy(last_user_message=message)
-        allow_tool_preprocessing = not tool_policy.block_all_tool_calls
+            reply = await llm_call_async(
+                sess.endpoint_url,
+                sess.model,
+                ctx.messages,
+                headers=sess.headers,
+                temperature=ctx.preset.temperature,
+                max_tokens=ctx.preset.max_tokens,
+                prompt_type=preset_id,
+                session_id=session,
+            )
+            _clean_reply, _clean_md = clean_thinking_for_save(reply, {"model": sess.model})
+            sess.add_message(ChatMessage("assistant", _clean_reply, metadata=_clean_md))
 
-        # Inline memory command
-        memory_response = None
-        if not tool_policy.blocks("manage_memory"):
-            memory_response = await chat_handler.handle_memory_command(sess, message)
-        if memory_response:
-            return {"response": memory_response}
+            from core.database import update_session_last_accessed
+            update_session_last_accessed(session)
+            session_manager.save_sessions()
 
-        # Build shared context
-        ctx = await build_chat_context(
-            sess, request, chat_handler, chat_processor,
-            message=message,
-            session_id=session,
-            preset_id=preset_id,
-            att_ids=att_ids,
-            use_web=use_web,
-            time_filter=time_filter,
-            webhook_manager=webhook_manager,
-            allow_tool_preprocessing=allow_tool_preprocessing,
-        )
+            # Background tasks
+            run_post_response_tasks(
+                sess, session_manager, session, message, reply, None,
+                ctx.uprefs, memory_manager, memory_vector, webhook_manager,
+                character_name=ctx.preset.character_name,
+                owner=ctx.user,
+                allow_background_extraction=not tool_policy.block_all_tool_calls,
+            )
 
-        # Research injection
-        research_blocked_by_policy = (
-            tool_policy.blocks("trigger_research")
-            or tool_policy.blocks("manage_research")
-        )
-        if use_research and not research_blocked_by_policy:
-            try:
-                _r_ep, _r_model, _r_headers = _resolve_research_endpoint(sess)
-                research_ctx = await research_handler.call_research_service(
-                    message, _r_ep, _r_model, llm_headers=_r_headers
-                )
-                ctx.messages.insert(
-                    len(ctx.preface),
-                    untrusted_context_message("research context", research_ctx),
-                )
-            except Exception as e:
-                logger.error(f"Research failed: {e}")
-
-        reply = await llm_call_async(
-            sess.endpoint_url,
-            sess.model,
-            ctx.messages,
-            headers=sess.headers,
-            temperature=ctx.preset.temperature,
-            max_tokens=ctx.preset.max_tokens,
-            prompt_type=preset_id,
-            session_id=session,
-        )
-        _clean_reply, _clean_md = clean_thinking_for_save(reply, {"model": sess.model})
-        sess.add_message(ChatMessage("assistant", _clean_reply, metadata=_clean_md))
-
-        from core.database import update_session_last_accessed
-        update_session_last_accessed(session)
-        session_manager.save_sessions()
-
-        # Background tasks
-        run_post_response_tasks(
-            sess, session_manager, session, message, reply, None,
-            ctx.uprefs, memory_manager, memory_vector, webhook_manager,
-            character_name=ctx.preset.character_name,
-            owner=ctx.user,
-            allow_background_extraction=not tool_policy.block_all_tool_calls,
-        )
-
-        return {"response": reply}
+            return {"response": reply}
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            raise HTTPException(500, f"Chat endpoint crash: {e}\n{tb}")
 
     # ------------------------------------------------------------------ #
     # POST /api/chat_stream
