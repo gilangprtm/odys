@@ -12,8 +12,8 @@ from typing import Any, Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
-VAULT_SCAN_GLOBS = ("*.md", "wiki/**/*.md", "Philosophy/**/*.md", "Sessions/**/*.md")
-VAULT_SKIP_PARTS = {"graphify-out", "ingested", "raw", "_templates", "node_modules", ".git"}
+VAULT_SCAN_GLOBS = ("**/*.md",)
+VAULT_SKIP_PARTS = {"node_modules", ".git"}
 
 
 def _safe_import():
