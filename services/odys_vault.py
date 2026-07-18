@@ -13,14 +13,21 @@ from typing import Any
 
 
 def default_vault_path() -> Path:
-    """C:/Users/<user>/Documents/Odys-Vault (Windows) or ~/Documents/Odys-Vault."""
-    home = Path.home()
-    docs = home / "Documents"
-    if not docs.is_dir():
-        docs = home / "documents"
-    if not docs.is_dir():
-        docs = home
-    return docs / "Odys-Vault"
+    """Cross-platform default vault path.
+    Windows: ~/Documents/Odys-Vault
+    Linux/Mac: ~/.odys-vault (or ./data/vault if in Docker)
+    """
+    import sys
+    if sys.platform == "win32":
+        home = Path.home()
+        docs = home / "Documents"
+        if not docs.is_dir():
+            docs = home / "documents"
+        if not docs.is_dir():
+            docs = home
+        return docs / "Odys-Vault"
+    # Linux/Mac → ~/.odys-vault (or fall back to ./data/vault for Docker)
+    return Path.home() / ".odys-vault"
 
 
 def config_path() -> Path:

@@ -442,6 +442,13 @@ def natural_boot(*, force_sync: bool = False, force_decay: bool = False) -> dict
     # 1) vault sync
     last_sync = cfg.get(_LAST_SYNC_KEY)
     if force_sync or _hours_since(last_sync) >= 6:
+        # Ensure vault exists before syncing (creates structure if missing, cross-platform)
+        try:
+            from services.odys_vault import ensure_odys_vault, get_vault_path
+            ensure_odys_vault(get_vault_path())
+        except Exception as ev:
+            logger.error(f"Failed to ensure odys vault at boot: {ev}")
+
         r = sync_vault_notes()
         out["vault_sync"] = r
         out["actions"].append("vault_sync")
