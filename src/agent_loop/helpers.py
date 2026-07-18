@@ -37,8 +37,6 @@ from src.agent_tools import (
 _cached_base_prompt = None
 _cached_base_prompt_key = None
 
-from src.agent_loop.tool_runner import _build_base_prompt
-
 from src.agent_loop.prompts import (
     TOOL_SECTIONS,
     get_builtin_overrides,
@@ -903,6 +901,7 @@ def _build_system_prompt(
     active_email: Optional[Dict[str, str]] = None,
 ) -> List[Dict]:
     """Build agent system prompt, inject MCP/document context, merge consecutive system msgs."""
+    from src.agent_loop.tool_runner import _build_base_prompt
     global _cached_base_prompt, _cached_base_prompt_key
     if suppress_local_context:
         active_document = None
