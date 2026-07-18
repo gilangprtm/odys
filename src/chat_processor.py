@@ -232,11 +232,14 @@ class ChatProcessor:
         rag_sources = []
 
         # Add preset system prompt if specified
-        if preset_system_prompt:
-            preface.append({
-                "role": "system",
-                "content": preset_system_prompt
-            })
+        fallback_prompt = (
+            "You are Sira, the user's personal AI assistant. Call the user \"Tuan\" (formal).\n"
+            "You have access to the user's Odys-Vault. Always reply politely and maintain your identity as Sira."
+        )
+        preface.append({
+            "role": "system",
+            "content": preset_system_prompt if (preset_system_prompt and preset_system_prompt.strip()) else fallback_prompt
+        })
         preface.append({
             "role": "system",
             "content": UNTRUSTED_CONTEXT_POLICY,
