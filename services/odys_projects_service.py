@@ -20,7 +20,11 @@ def get_projects_root() -> Path:
     env = os.environ.get("ODY_PROJECTS_PATH") or os.environ.get("ODYS_PROJECTS_PATH")
     if env:
         return Path(env).expanduser()
-    return Path("D:/Project")
+    # Cross-platform fallback
+    import sys
+    if sys.platform == "win32":
+        return Path("D:/Project")
+    return Path.home() / "projects"
 
 DEFAULT_PROJECTS_ROOT = get_projects_root()
 DATA_DIR = Path("data/odys_projects")
