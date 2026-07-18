@@ -259,7 +259,7 @@
 
   <div class="error" id="error" role="alert" aria-live="assertive"></div>
 
-  <form id="authForm" method="post" autocomplete="on">
+  <form id="authForm" autocomplete="on">
     <label for="username">Username</label>
     <div class="pw-wrapper">
       <input id="username" name="username" type="text" required autofocus autocomplete="username">
@@ -548,7 +548,7 @@
 })();
 
 // Prevent login button and eye toggles from stealing focus on mobile (keeps keyboard open)
-document.querySelectorAll('#submitBtn, .pw-toggle').forEach(btn => {
+document.querySelectorAll('.pw-toggle').forEach(btn => {
   btn.addEventListener('touchstart', (e) => { e.preventDefault(); }, { passive: false });
   btn.addEventListener('touchend', (e) => {
     e.preventDefault();
