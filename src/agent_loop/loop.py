@@ -329,6 +329,15 @@ async def stream_agent_loop(
             # Non-English queries are flagged low_signal by the English-only
             # intent classifier, but fastembed retrieval works across languages.
             logger.info("[tool-rag] Low-signal query; will run RAG retrieval")
+    # Admin bypass — send ALL tool schemas, skip RAG filtering entirely.
+    # Matches Hermes behavior: all tools visible at all times.
+    if owner == "admin":
+        from src.tool_schemas import FUNCTION_TOOL_SCHEMAS
+        _relevant_tools = {
+            s["function"]["name"] for s in FUNCTION_TOOL_SCHEMAS
+            if "function" in s and "name" in s["function"]
+        }
+        logger.info(f"[tool-rag] Admin owner: {len(_relevant_tools)} tools (bypass RAG)")
     if not guide_only and not _relevant_tools:
         try:
             from src.tool_index import get_tool_index, ALWAYS_AVAILABLE
