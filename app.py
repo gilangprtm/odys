@@ -270,6 +270,15 @@ if AUTH_ENABLED:
     app.add_middleware(AuthMiddleware)
     logger.info("Auth middleware enabled (AUTH_ENABLED=true)")
 else:
+    # Single-user mode: always set request user to "admin" so the
+    # rest of the app (tools, filesystem access) sees an admin owner
+    # instead of None, which would block all non-admin tools.
+    class DisabledAuthMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            request.state.current_user = "admin"
+            request.state.api_token = False
+            return await call_next(request)
+    app.add_middleware(DisabledAuthMiddleware)
     logger.info("Auth middleware disabled (set AUTH_ENABLED=true to enable)")
 
 # ── Static files ───────────────────────────────────────────────

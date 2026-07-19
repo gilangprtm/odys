@@ -27,6 +27,15 @@ def setup_lifespan(app, **components):
 
     @asynccontextmanager
     async def _lifespan(app):
+        # ── Auto-admin (if no users configured) ──
+        if "auth_manager" in components:
+            try:
+                am = components["auth_manager"]
+                if not am.is_configured:
+                    logger.info("Auto-configuring default admin account (admin/admin)")
+                    am.create_user("admin", "admin", is_admin=True)
+            except Exception as e:
+                logger.warning(f"Auto-admin failed: {e}")
         # ── STARTUP ──
         await _startup_event(app, **components)
         yield

@@ -175,6 +175,18 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
 
     @router.get("/status")
     async def auth_status(request: Request):
+        # If Auth is disabled by environment, always return authenticated=True as admin
+        AUTH_ENABLED = os.getenv("AUTH_ENABLED", "true").lower() != "false"
+        if not AUTH_ENABLED:
+            return {
+                "configured": True,
+                "authenticated": True,
+                "username": "admin",
+                "is_admin": True,
+                "signup_enabled": False,
+                "privileges": auth_manager.get_privileges("admin")
+            }
+
         token = request.cookies.get(SESSION_COOKIE)
         result = auth_manager.status(token)
         result["signup_enabled"] = auth_manager.signup_enabled
