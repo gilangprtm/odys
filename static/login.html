@@ -259,7 +259,7 @@
 
   <div class="error" id="error" role="alert" aria-live="assertive"></div>
 
-  <form id="authForm" autocomplete="on" onsubmit="return false;">
+  <form id="authForm" autocomplete="on">
     <label for="username">Username</label>
     <div class="pw-wrapper">
       <input id="username" name="username" type="text" required autofocus autocomplete="username">
@@ -387,7 +387,11 @@
 
   submitBtn.addEventListener('click', async (e) => {
     e.preventDefault();
-    form.dispatchEvent(new Event('submit'));
+    if (typeof form.requestSubmit === 'function') {
+      form.requestSubmit();
+    } else {
+      form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    }
   });
 
   toggleLink.addEventListener('click', (e) => {
