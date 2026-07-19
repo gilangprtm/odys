@@ -311,7 +311,8 @@
 
   // Prefill last username
   const usernameInput = document.getElementById('username');
-  const savedUser = localStorage.getItem('odysseus-last-user');
+  let savedUser = null;
+  try { savedUser = localStorage.getItem('odysseus-last-user'); } catch(e) {}
   if (savedUser && usernameInput) {
     usernameInput.value = savedUser;
     document.getElementById('password').focus();
@@ -471,9 +472,11 @@
     const remember = document.getElementById('remember').checked;
     function finishLogin() {
       const _rem = document.getElementById('remember').checked;
-      if (_rem) localStorage.setItem('odysseus-last-user', username);
-      else localStorage.removeItem('odysseus-last-user');
-      sessionStorage.removeItem('ody-session-active');
+      try {
+        if (_rem) localStorage.setItem('odysseus-last-user', username);
+        else localStorage.removeItem('odysseus-last-user');
+        sessionStorage.removeItem('ody-session-active');
+      } catch(e) {}
       submitBtn.innerHTML = '<span class="login-spinner" aria-hidden="true"></span>';
       submitBtn.disabled = true;
       Promise.all([
@@ -481,9 +484,11 @@
         fetch('/api/auth/features', { credentials: 'same-origin' }).then(r => r.json()),
         fetch('/api/auth/settings', { credentials: 'same-origin' }).then(r => r.json()),
       ]).then(([sess, feat, sett]) => {
-        sessionStorage.setItem('ody-prefetch-sessions', JSON.stringify(sess));
-        sessionStorage.setItem('ody-prefetch-features', JSON.stringify(feat));
-        sessionStorage.setItem('ody-prefetch-settings', JSON.stringify(sett));
+        try {
+          sessionStorage.setItem('ody-prefetch-sessions', JSON.stringify(sess));
+          sessionStorage.setItem('ody-prefetch-features', JSON.stringify(feat));
+          sessionStorage.setItem('ody-prefetch-settings', JSON.stringify(sett));
+        } catch(e) {}
       }).catch(() => {}).finally(() => { window.location.replace('/'); });
     }
     async function doLogin(totpCode) {
