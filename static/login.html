@@ -287,7 +287,7 @@
       </div>
     </div>
 
-    <button type="submit" id="submitBtn">Sign In</button>
+    <button type="button" id="submitBtn">Sign In</button>
   </form>
 
   <div class="toggle" id="toggleArea" style="display:none">
@@ -384,6 +384,11 @@
   } catch (e) {
     setMode('login');
   }
+
+  submitBtn.addEventListener('click', async (e) => {
+    e.preventDefault();
+    form.dispatchEvent(new Event('submit'));
+  });
 
   toggleLink.addEventListener('click', (e) => {
     e.preventDefault();
