@@ -387,10 +387,25 @@
 
   submitBtn.addEventListener('click', async (e) => {
     e.preventDefault();
-    if (typeof form.requestSubmit === 'function') {
-      form.requestSubmit();
-    } else {
-      form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    const username = document.getElementById('username').value.trim();
+    const password = document.getElementById('password').value;
+    if (!username || !password) return;
+    submitBtn.disabled = true;
+    errEl.style.display = 'none';
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ username, password, remember: document.getElementById('remember').checked })
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.detail || 'Login failed');
+      finishLogin();
+    } catch (err) {
+      errEl.textContent = err.message;
+      errEl.style.display = 'block';
+      submitBtn.disabled = false;
     }
   });
 
