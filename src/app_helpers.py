@@ -2,6 +2,7 @@
 import base64
 import logging
 import os
+import secrets
 
 from fastapi import HTTPException
 from fastapi.responses import HTMLResponse
@@ -66,6 +67,9 @@ def serve_html_with_nonce(request: Request, file_path: str) -> HTMLResponse:
         logger.exception("Failed to read page %s", file_path)
         raise HTTPException(500, "Internal server error")
     nonce = getattr(request.state, "csp_nonce", "")
+    if not nonce:
+        nonce = secrets.token_hex(16)
+        request.state.csp_nonce = nonce
     html = html.replace("{{CSP_NONCE}}", nonce)
     html = html.replace("{{APP_VERSION}}", APP_VERSION)
     # Inline partial include pattern: <include path="/static/templates/head.html" />
