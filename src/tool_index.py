@@ -460,6 +460,10 @@ class ToolIndex:
                    "make it light", "make the ui", "switch theme", "change theme",
                    "dark mode", "light mode", "toggle"}):
             {"ui_control"},
+        # Shell / Bash intent
+        frozenset({"shell", "bash", "command", "terminal", "run command",
+                   "execute", "cli", "prompt", "pwd", "ls", "grep", "echo"}):
+            {"bash", "python", "read_file", "write_file", "grep", "ls", "glob", "get_workspace"},
         # Cookbook / model serving intent — user says "kill cookbook",
         # "stop the model", "what's running", etc.
         frozenset({"cookbook", "kill cookbook", "stop cookbook",
