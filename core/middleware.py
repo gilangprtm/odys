@@ -63,6 +63,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """Add standard security headers to all responses."""
 
     async def dispatch(self, request: Request, call_next) -> Response:
+        # Pre-generate CSP nonce BEFORE the route handler so that inline
+        # serve_html_with_nonce (called inside a route) and the response CSP
+        # header share the SAME nonce. Otherwise nonce mismatch blocks all scripts.
+        request.state.csp_nonce = secrets.token_hex(16)
+
         response = await call_next(request)
         path = request.url.path
 
@@ -113,7 +118,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             # don't execute script, the residual risk is visual-only.
             content_type = response.headers.get("content-type", "").lower()
             if content_type.startswith("text/html"):
-                nonce = secrets.token_hex(16)
+                nonce = getattr(request.state, "csp_nonce", secrets.token_hex(16))
                 request.state.csp_nonce = nonce
                 script_src = f"'self' 'nonce-{nonce}' https://cdn.jsdelivr.net"
             else:
