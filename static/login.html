@@ -287,7 +287,7 @@
       </div>
     </div>
 
-    <button type="button" id="submitBtn">Sign In</button>
+    <button type="submit" id="submitBtn">Sign In</button>
   </form>
 
   <div class="toggle" id="toggleArea" style="display:none">
@@ -384,30 +384,6 @@
   } catch (e) {
     setMode('login');
   }
-
-  submitBtn.addEventListener('click', async (e) => {
-    e.preventDefault();
-    const username = document.getElementById('username').value.trim();
-    const password = document.getElementById('password').value;
-    if (!username || !password) return;
-    submitBtn.disabled = true;
-    errEl.style.display = 'none';
-    try {
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
-        body: JSON.stringify({ username, password, remember: document.getElementById('remember').checked })
-      });
-      const data = await res.json();
-      if (!res.ok || !data.ok) throw new Error(data.detail || 'Login failed');
-      finishLogin();
-    } catch (err) {
-      errEl.textContent = err.message;
-      errEl.style.display = 'block';
-      submitBtn.disabled = false;
-    }
-  });
 
   toggleLink.addEventListener('click', (e) => {
     e.preventDefault();
@@ -572,7 +548,7 @@
 })();
 
 // Prevent login button and eye toggles from stealing focus on mobile (keeps keyboard open)
-document.querySelectorAll('.pw-toggle').forEach(btn => {
+document.querySelectorAll('#submitBtn, .pw-toggle').forEach(btn => {
   btn.addEventListener('touchstart', (e) => { e.preventDefault(); }, { passive: false });
   btn.addEventListener('touchend', (e) => {
     e.preventDefault();
