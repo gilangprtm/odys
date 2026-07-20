@@ -452,6 +452,7 @@ async def stream_agent_loop(
     # lets a legit batch (e.g. 18 calendar events at once) through.
     _call_freq: collections.Counter = collections.Counter()
     _force_answer = False  # set by loop-breaker → next round runs with NO tools
+    _awaiting_user = False  # set by ask_user → end the turn and wait for a choice
     # Supervisor: how many times we've nudged the model after it announced
     # an action without emitting the tool call. Capped to prevent a model
     # that *can't* call the tool from looping forever.    # "I said I would, then didn't" detector. The pattern that breaks debug
