@@ -70,12 +70,7 @@ from src.agent_loop.helpers import (
     _is_email_document_obj,
     _minimal_saved_memory_message,
     _compact_email_draft_context,
-    _minimal_odysseus_doc_messages,
-    _looks_like_notes_turn,
-    _minimal_odysseus_notes_messages,
-    _looks_like_memory_identity_turn,
-    _minimal_odysseus_general_messages,
-    _strip_doc_model_artifacts,
+                        _strip_doc_model_artifacts,
     _normalize_truncated_document_tool_fences,
     _normalize_stream_document_fences,
     _recent_context_for_retrieval,
@@ -169,8 +164,6 @@ async def stream_agent_loop(
     _t0 = time.time()
     _needs_admin = _detect_admin_intent(messages)
     _last_user = _extract_last_user_message(messages)
-    _ody_qwen_finetune_model = (model or "").lower().startswith("odysseus-qwen3")
-    _ody_memory_identity_turn = _looks_like_memory_identity_turn(_last_user)
     _intent = _classify_agent_request(messages, _last_user)
     _low_signal_turn = bool(_intent.get("low_signal"))
     _casual_low_signal_turn = _is_casual_low_signal(_last_user)
@@ -183,19 +176,6 @@ async def stream_agent_loop(
             "mcp__email__list_emails", "mcp__email__read_email",
         })
     _prompt_active_document = active_document if _active_document_relevant else None
-    _direct_low_signal = (
-        _low_signal_turn
-        and not _existing_conversation
-        and not bool(_intent.get("continuation"))
-        and not plan_mode
-        and not approved_plan
-        and not guide_only
-        and (_casual_low_signal_turn or not _active_document_relevant)
-        and (_casual_low_signal_turn or not active_email)
-        and (_casual_low_signal_turn or not workspace)
-        and not forced_tools
-        and not relevant_tools
-    )
     # Tool retrieval uses the latest message by default. It may inherit recent
     # user turns only for explicit continuations ("yes", "do it", "1").
     _retrieval_query = str(_intent.get("retrieval_query") or _last_user)
@@ -214,88 +194,6 @@ async def stream_agent_loop(
             _last_user[:80],
         )
     _mcp_disabled_map = _load_mcp_disabled_map() if mcp_mgr else {}
-    if _direct_low_signal:
-        logger.info("[agent] direct low-signal reply path for latest=%r", _last_user[:80])
-        direct_messages = (
-            _minimal_odysseus_general_messages(
-                messages,
-                include_memory=True,
-            )
-            if _ody_qwen_finetune_model
-            else [{"role": "user", "content": _last_user}]
-        )
-        direct_response = ""
-        direct_start = time.time()
-        direct_actual_model = model
-        real_input_tokens = 0
-        real_output_tokens = 0
-        try:
-            async for chunk in stream_llm_with_fallback(
-                [(endpoint_url, model, headers)] + list(fallbacks or []),
-                direct_messages,
-                temperature=temperature,
-                max_tokens=min(max_tokens or 128, 128),
-                prompt_type=None,
-                tools=None,
-                timeout=int(get_setting("agent_stream_timeout_seconds", 300) or 300),
-                session_id=session_id,
-                workload=workload,
-            ):
-                if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
-                    try:
-                        data = json.loads(chunk[6:])
-                    except json.JSONDecodeError:
-                        yield chunk
-                        continue
-                    if data.get("type") == "usage":
-                        usage = data.get("data", {}) or {}
-                        direct_actual_model = usage.get("model") or direct_actual_model
-                        real_input_tokens += usage.get("input_tokens", 0) or 0
-                        real_output_tokens += usage.get("output_tokens", 0) or 0
-                        continue
-                    if data.get("type") == "model_actual":
-                        direct_actual_model = data.get("model") or direct_actual_model
-                        data["requested_model"] = model
-                        yield f"data: {json.dumps(data)}\n\n"
-                        continue
-                    if data.get("type") == "fallback":
-                        direct_actual_model = data.get("answered_by") or direct_actual_model
-                        yield chunk
-                        continue
-                    if "delta" in data:
-                        if not data.get("thinking"):
-                            direct_response += data.get("delta", "")
-                        yield chunk
-                        continue
-                    yield chunk
-                elif chunk.startswith("event: "):
-                    yield chunk
-        except Exception as _direct_err:
-            logger.warning("[agent] direct low-signal path failed: %s", _direct_err)
-            fallback = "Hey."
-            direct_response += fallback
-            yield f"data: {json.dumps({'delta': fallback})}\n\n"
-
-        if not direct_response.strip():
-            fallback = "Hey."
-            direct_response = fallback
-            yield f"data: {json.dumps({'delta': fallback})}\n\n"
-
-        duration = time.time() - direct_start
-        metrics = {
-            "model": direct_actual_model,
-            "requested_model": model,
-            "input_tokens": real_input_tokens or estimate_tokens(direct_messages),
-            "output_tokens": real_output_tokens or max(len(direct_response) // 4, 1),
-            "total_time": round(duration, 2),
-            "response_time": round(duration, 2),
-            "agent_rounds": 0,
-            "tool_calls": 0,
-            "direct_low_signal": True,
-        }
-        yield f"data: {json.dumps({'type': 'metrics', 'data': metrics})}\n\n"
-        yield "data: [DONE]\n\n"
-        return
 
     if plan_mode and mcp_mgr:
         # Allow read-only MCP tools to investigate, block write/unknown ones:
@@ -306,268 +204,33 @@ async def stream_agent_loop(
         disabled_tools.update(_mcp_block_q)
     prep_timings["request_setup"] = time.time() - _t0
 
-    # RAG-based tool selection: retrieve relevant tools for this query.
-    # If caller provided a pre-computed set (e.g. task_scheduler), use that.
+    # Tool Selection (Hermes style)
+    # Odys used to run RAG + keyword fallbacks here. Hermes upstream just passes
+    # ALL active tools so the model has its full capabilities.
     _relevant_tools = relevant_tools
     _t1 = time.time()
+    
     if _relevant_tools:
-        logger.info(f"[tool-rag] Using caller-provided relevant_tools ({len(_relevant_tools)} tools)")
-    if not guide_only and not _relevant_tools and _low_signal_turn:
-        from src.tool_index import ALWAYS_AVAILABLE
-        if workspace:
-            # An active workspace IS the file-work signal: a vague "look at the
-            # project" means explore this folder. Surface only the READ-ONLY file
-            # tools (intersection with the plan-mode read-only allowlist) so the
-            # agent can investigate; write/shell tools stay out until the request
-            # actually calls for them (RAG retrieval adds those on a real ask).
-            _relevant_tools = set(ALWAYS_AVAILABLE)
-            from src.tool_security import PLAN_MODE_READONLY_TOOLS
-            _relevant_tools |= (_DOMAIN_TOOL_MAP["files"] & PLAN_MODE_READONLY_TOOLS)
-            logger.info("[tool-rag] Low-signal but workspace active; including read-only file tools")
-        else:
-            # Don't short-circuit: fall through to RAG retrieval below.
-            # Non-English queries are flagged low_signal by the English-only
-            # intent classifier, but fastembed retrieval works across languages.
-            logger.info("[tool-rag] Low-signal query; will run RAG retrieval")
-    # Admin bypass — send ALL tool schemas, skip RAG filtering entirely.
-    # Matches Hermes behavior: all tools visible at all times.
-    if owner == "admin":
+        logger.info(f"[tool-selection] Using caller-provided relevant_tools ({len(_relevant_tools)} tools)")
+    else:
+        # Default: all tools are relevant. `disabled_tools` (from toolsets or policy)
+        # will filter them out later before they reach the model.
         from src.tool_schemas import FUNCTION_TOOL_SCHEMAS
         _relevant_tools = {
             s["function"]["name"] for s in FUNCTION_TOOL_SCHEMAS
             if "function" in s and "name" in s["function"]
         }
-        logger.info(f"[tool-rag] Admin owner: {len(_relevant_tools)} tools (bypass RAG)")
-    if not guide_only and not _relevant_tools:
-        try:
-            from src.tool_index import get_tool_index, ALWAYS_AVAILABLE
-            try:
-                tool_idx = await asyncio.wait_for(
-                    asyncio.to_thread(get_tool_index),
-                    timeout=_TOOL_SELECTION_TIMEOUT_SECONDS,
-                )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "[tool-rag] Tool index init exceeded %.1fs; falling back to always-available tools",
-                    _TOOL_SELECTION_TIMEOUT_SECONDS,
-                )
-                tool_idx = None
-                _relevant_tools = set(ALWAYS_AVAILABLE)
-            if tool_idx:
-                if mcp_mgr:
-                    try:
-                        await asyncio.wait_for(
-                            asyncio.to_thread(tool_idx.index_mcp_tools, mcp_mgr, _mcp_disabled_map),
-                            timeout=_TOOL_SELECTION_TIMEOUT_SECONDS,
-                        )
-                    except asyncio.TimeoutError:
-                        logger.warning(
-                            "[tool-rag] MCP tool indexing exceeded %.1fs; continuing without reindex",
-                            _TOOL_SELECTION_TIMEOUT_SECONDS,
-                        )
-                if _retrieval_query:
-                    try:
-                        _relevant_tools = await asyncio.wait_for(
-                            asyncio.to_thread(tool_idx.get_tools_for_query, _retrieval_query, 8),
-                            timeout=_TOOL_SELECTION_TIMEOUT_SECONDS,
-                        )
-                        logger.info(f"[tool-rag] Retrieved tools for query: {sorted(_relevant_tools - ALWAYS_AVAILABLE)}")
-                    except asyncio.TimeoutError:
-                        # Leave _relevant_tools unset so the keyword fallback
-                        # below still runs. Hard-coding ALWAYS_AVAILABLE here
-                        # skipped the deterministic keyword hints whenever the
-                        # embedding backend was slow (e.g. a remote endpoint
-                        # cold-loading its model), silently stripping email/
-                        # calendar tools from queries that named them outright.
-                        logger.warning(
-                            "[tool-rag] Retrieval exceeded %.1fs; falling back to keyword tool selection",
-                            _TOOL_SELECTION_TIMEOUT_SECONDS,
-                        )
-                        _relevant_tools = None
-        except Exception as e:
-            logger.warning(f"[tool-rag] Retrieval failed, using keyword fallback: {e}")
-            _relevant_tools = None
-
-    # Fallback: if RAG unavailable, use keyword-based tool selection
-    # instead of sending ALL tools (which overwhelms the model).
-    if not guide_only and not _relevant_tools and _retrieval_query:
-        from src.tool_index import ALWAYS_AVAILABLE, ToolIndex
-        _relevant_tools = set(ALWAYS_AVAILABLE)
-        ql = _retrieval_query.lower()
-        for keywords, tools in ToolIndex._KEYWORD_HINTS.items():
-            if any(kw in ql for kw in keywords):
-                _relevant_tools.update(tools)
-        logger.info(f"[tool-rag] Keyword fallback selected: {sorted(_relevant_tools - ALWAYS_AVAILABLE)}")
-
-    # If deterministic domain detection fired, seed the corresponding domain
-    # tools into the selected tool set. This is not direct prompt-pack
-    # injection: `_assemble_prompt()` still derives domain rules from the final
-    # tool names. It prevents obvious requests like "last 5 emails" from
-    # collapsing to only ask_user/manage_memory when vector retrieval misses or
-    # times out.
-    if not guide_only and _relevant_tools is not None:
-        for _domain in (_intent.get("domains") or set()):
-            _relevant_tools.update(_DOMAIN_TOOL_MAP.get(str(_domain), set()))
-        if "cookbook" in (_intent.get("domains") or set()):
-            _relevant_tools.update({
-                "list_served_models",
-                "list_downloads",
-                "list_cached_models",
-                "list_cookbook_servers",
-                "list_serve_presets",
-            })
-        if "email" in (_intent.get("domains") or set()):
-            _relevant_tools.add("ui_control")
-        if "web" in (_intent.get("domains") or set()):
-            _relevant_tools.update(WEB_TOOL_NAMES)
-            _blocked_web_tools = sorted(WEB_TOOL_NAMES & disabled_tools)
-            if _blocked_web_tools:
-                logger.info(
-                    "[agent-intent] web domain selected but search tools remain disabled=%s",
-                    _blocked_web_tools,
-                )
-        if "ui" in (_intent.get("domains") or set()):
-            _relevant_tools.add("ui_control")
+        logger.info(f"[tool-selection] All {len(_relevant_tools)} tools provided to agent")
 
     # If this turn targets the open document, keep editing tools available
-    # regardless of which selection path (RAG, keyword, caller-provided) ran.
-    # Do not leak document tools into unrelated turns just because the editor
-    # panel is open.
-    if _relevant_tools is not None and _active_document_relevant:
+    if _active_document_relevant:
         _relevant_tools.update({"edit_document", "update_document", "suggest_document"})
         if _active_email_draft_relevant:
-            # The open compose document already contains the recipient,
-            # subject, source UID, and quoted previous-message excerpt. Reading
-            # the same email again through IMAP/MCP is slow, token-heavy, and
-            # can hang. Keep draft editing tools, drop email fetch tools.
             _email_fetch_tools = {
                 "list_email_accounts", "list_emails", "read_email",
                 "mcp__email__list_emails", "mcp__email__read_email",
             }
-            removed = sorted(_relevant_tools & _email_fetch_tools)
-            if removed:
-                _relevant_tools.difference_update(_email_fetch_tools)
-                logger.info("[agent-intent] active email draft pruned fetch tools=%s", removed)
-
-    # Current-turn chat uploads are real files under the upload/data root. Make
-    # the read-side file/document tools visible immediately so the agent can
-    # inspect files whose inline text was truncated or omitted.
-    if not guide_only and uploaded_files:
-        if _relevant_tools is None:
-            from src.tool_index import ALWAYS_AVAILABLE
-            _relevant_tools = set(ALWAYS_AVAILABLE)
-        _relevant_tools.update({"read_file", "grep", "ls", "manage_documents"})
-
-    # Per-request forced tools are stronger than retrieval. Explicit search
-    # settings make web tools visible even when tool RAG misses them;
-    # route-level disabled_tools decides what remains allowed.
-    if not guide_only and forced_tools:
-        forced_set = {t for t in forced_tools if t not in disabled_tools}
-        if _relevant_tools is None:
-            from src.tool_index import ALWAYS_AVAILABLE
-            _relevant_tools = set(ALWAYS_AVAILABLE)
-        _relevant_tools.update(forced_set)
-
-    # The skill index injected by _build_system_prompt tells the model to
-    # call `manage_skills action=view`, and Jaccard-matched skills are pasted
-    # into the prompt as procedures to follow — but neither path goes through
-    # tool selection, so the model can be handed a procedure naming tools
-    # (grep, read_file, ...) that aren't in its schema list. Keep the schemas
-    # in lockstep: manage_skills is callable whenever any skill is indexed,
-    # and a matched skill's declared requires_toolsets ride along with it.
-    if not guide_only and _relevant_tools is not None and not _low_signal_turn:
-        try:
-            from services.memory.skills import SkillsManager
-            from src.constants import DATA_DIR
-            _skills_on = True
-            try:
-                from routes.prefs_routes import _load_for_user as _load_prefs
-                _skills_on = (_load_prefs(owner) or {}).get("skills_enabled", True)
-            except Exception:
-                pass
-            _sm = SkillsManager(DATA_DIR)
-            _owner_skills = _sm.load(owner=owner) if _skills_on else []
-            if _owner_skills:
-                _relevant_tools.add("manage_skills")
-                if _retrieval_query:
-                    # Validate against every known executable tool, not just
-                    # TOOL_SECTIONS — code-nav tools (grep/glob/ls) ship as
-                    # schemas without a prompt-prose section.
-                    from src.tool_policy import known_tool_names
-                    _known = known_tool_names()
-                    for _sk in _sm.get_relevant_skills(
-                        _retrieval_query, skills=_owner_skills,
-                        threshold=0.25, max_items=3,
-                    ):
-                        _relevant_tools.update(
-                            t for t in (_sk.get("requires_toolsets") or [])
-                            if t in _known
-                        )
-        except Exception as _e:
-            logger.debug(f"[tool-rag] skill-aware tool include skipped: {_e}")
-
-    _intent_domains = set(_intent.get("domains") or set())
-    _ody_doc_finetune_mode = (
-        _ody_qwen_finetune_model
-        and (
-            "documents" in _intent_domains
-            or _active_document_relevant
-            or _prompt_active_document is not None
-        )
-        and "files" not in _intent_domains
-        and not guide_only
-    )
-    _ody_notes_finetune_mode = (
-        _ody_qwen_finetune_model
-        and not _ody_doc_finetune_mode
-        and ("notes_calendar_tasks" in _intent_domains or _looks_like_notes_turn(_last_user))
-        and _looks_like_notes_turn(_last_user)
-        and "files" not in _intent_domains
-        and not guide_only
-    )
-    _ody_doc_stream_create_mode = _ody_doc_finetune_mode and _prompt_active_document is None
-    if _ody_doc_finetune_mode and _relevant_tools is not None:
-        if _prompt_active_document is not None:
-            _relevant_tools = {
-                "edit_document", "update_document", "suggest_document",
-                "ask_user", "update_plan",
-            }
-        else:
-            _relevant_tools = {"create_document", "ask_user", "update_plan"}
-        logger.info("[agent-intent] odysseus doc finetune tool clamp=%s", sorted(_relevant_tools))
-    elif _ody_notes_finetune_mode and _relevant_tools is not None:
-        _relevant_tools = {"manage_notes", "ask_user", "update_plan"}
-        logger.info("[agent-intent] odysseus notes finetune tool clamp=%s", sorted(_relevant_tools))
-
-    if (
-        _relevant_tools is not None
-        and _active_document_relevant
-        and "files" not in _intent_domains
-        and not uploaded_files
-        and not workspace
-    ):
-        _doc_irrelevant_file_tools = {
-            "append_file",
-            "bash",
-            "edit_file",
-            "glob",
-            "grep",
-            "ls",
-            "read_file",
-            "replace_file",
-            "run_shell",
-            "write_file",
-        }
-        _removed_doc_file_tools = sorted(_relevant_tools & _doc_irrelevant_file_tools)
-        if _removed_doc_file_tools:
-            _relevant_tools.difference_update(_doc_irrelevant_file_tools)
-            logger.info(
-                "[agent-intent] active document turn removed file tools=%s",
-                _removed_doc_file_tools,
-            )
-
-    if _relevant_tools is not None:
-        logger.info("[agent-intent] selected_tools=%s", sorted(_relevant_tools)[:50])
+            _relevant_tools.difference_update(_email_fetch_tools)
 
     prep_timings["tool_selection"] = time.time() - _t1
 
@@ -817,8 +480,6 @@ async def stream_agent_loop(
     requested_model = model
     actual_model = model
     total_tool_calls = 0  # for budget enforcement
-    _ody_notes_tool_completed = False
-
     # Session discipline tracking (totals across whole agent run)
     _session_tool_counts = {"web_fetch": 0, "web_search": 0, "bash": 0, "python": 0}
 
@@ -832,39 +493,12 @@ async def stream_agent_loop(
     # backstop. Counting identical repeats — not distinct same-tool calls —
     # lets a legit batch (e.g. 18 calendar events at once) through.
     _call_freq: collections.Counter = collections.Counter()
-    _force_answer = False  # set by loop-breaker → next round runs with NO tools
-    # Supervisor: how many times we've nudged the model after it announced
-    # an action without emitting the tool call. Capped to prevent a model
-    # that *can't* call the tool from looping forever.
-    _intent_nudge_count = 0
-    _MAX_INTENT_NUDGES = 2
-
-    # "I said I would, then didn't" detector. The pattern that breaks debug
-    # loops on weak models (deepseek-v4-flash mid-2026): the model writes
-    # "Let me tail the output to see the error" and then ends the turn with
-    # no tool_calls. The intent is sincere but the function call gets dropped.
-    # Match the common phrasings + an action verb that maps to an available
-    # tool, so we don't nudge on harmless transitional text like "let me
-    # know what you think".
-    _INTENT_RE = re.compile(
-        r"(?:^|\n)\s*(?:let me|i'?ll|i will|i need to|we need to|need to|"
-        r"i should|we should|i must|we must|going to|let's)\s+"
-        r"(?:tail|check|investigate|look at|see|tail|read|fetch|inspect|"
-        r"verify|diagnose|examine|debug|capture|grab|pull|view|run|call|"
-        r"trigger|launch|start|kick off|stop|kill|restart|adopt|serve|"
-        r"register|adopt|list|search|find|query|hit|ping|test|use|perform|do)"
-        r"\b[^.\n]{0,140}",
-        re.IGNORECASE,
-    )
     _awaiting_user = False  # set by ask_user → end the turn and wait for a choice
 
     # Document streaming state (persists across rounds)
     _doc_acc = ""          # accumulated tool-call JSON arguments
     _doc_opened = False    # whether doc_stream_open was sent
     _doc_last_len = 0      # last content length sent
-    _doc_stream_create_completed = False
-    _ody_doc_tool_completed = False
-
     # Set when the loop runs out of rounds while the agent was still actively
     # using tools — i.e. it was cut off, not finished. Drives a "Continue" event
     # so the user can resume instead of the turn silently stalling.
@@ -884,22 +518,12 @@ async def stream_agent_loop(
         # detect a SUBSEQUENT block in the same round.
         _doc_scan_from = 0
 
-        # Merge native tool schemas with MCP tool schemas, filtering out
         # Only send function schemas for API models (OpenAI, Anthropic, etc.).
         # Local models use fenced code blocks or <tool_code> — schemas add overhead.
         if _force_answer:
-            # Loop-breaker decided the model has enough info but keeps
-            # calling tools. Send NO tools this round so it's forced to
-            # write the answer instead of flailing further.
             all_tool_schemas = []
         elif _is_api_model:
-            # Filter schemas by RAG-selected tools (if available)
             if _relevant_tools:
-                # _build_base_prompt unions _ADMIN_TOOLS into the prompt
-                # sections when admin intent fires — the schema list must
-                # offer the same names, or the model reads prose describing
-                # tools it cannot call and substitutes the nearest schema
-                # it does have (e.g. manage_memory for manage_skills).
                 _schema_names = set(_relevant_tools)
                 if _needs_admin:
                     _schema_names |= _ADMIN_TOOLS
@@ -918,8 +542,6 @@ async def stream_agent_loop(
                     if s.get("function", {}).get("name") not in _ADMIN_SCHEMA_NAMES
                 ]
                 all_tool_schemas = base_schemas + mcp_schemas
-            if _ody_qwen_finetune_model:
-                all_tool_schemas = []
             if disabled_tools:
                 all_tool_schemas = [
                     t for t in all_tool_schemas
@@ -931,392 +553,6 @@ async def stream_agent_loop(
             _last_content = _last_user.lower()
             _wants_mcp = any(kw in _last_content for kw in _MCP_KEYWORDS)
             all_tool_schemas = mcp_schemas if (_wants_mcp and mcp_schemas) else []
-        agent_stream_timeout = int(get_setting("agent_stream_timeout_seconds", 300) or 300)
-
-        _tool_names_sent = [t.get("function", {}).get("name") for t in (all_tool_schemas or []) if t.get("function")]
-        logger.info(f"[agent-debug] round={round_num} model={model} _is_api_model={_is_api_model} tools_sent={len(_tool_names_sent)} tool_names={_tool_names_sent[:15]} relevant_tools={sorted(_relevant_tools)[:15] if _relevant_tools else 'ALL'}")
-
-        # Primary target + any configured fallback models. stream_llm_with_fallback
-        # only switches on a pre-content failure, so streamed output is never
-        # duplicated; the dead-host cooldown keeps repeat primary attempts cheap.
-        _candidates = [(endpoint_url, model, headers)] + list(fallbacks or [])
-        # stream_llm enforces a per-read INACTIVITY timeout (httpx read=timeout),
-        # which kills a wedged/silent endpoint. This wall-clock deadline is the
-        # complementary cap for the rare stream that trickles bytes forever and
-        # so never trips the inactivity timeout. Generous — only catches runaway.
-        _round_deadline = time.time() + max(agent_stream_timeout * 4, 1200)
-        _round_start = time.time()
-        _round_first_event_logged = False
-        _round_first_token_logged = False
-        logger.info(
-            "[agent-timing] round_start round=%s model=%s endpoint=%s prompt_tokens=%s tools=%s native_tools=%s timeout=%s",
-            round_num,
-            model,
-            endpoint_url,
-            estimate_tokens(messages),
-            len(_tool_names_sent),
-            bool(all_tool_schemas),
-            agent_stream_timeout,
-        )
-        async for chunk in stream_llm_with_fallback(
-            _candidates,
-            messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            prompt_type=prompt_type if round_num == 1 else None,
-            tools=all_tool_schemas if all_tool_schemas else None,
-            tool_choice_none=_ody_doc_finetune_mode,
-            timeout=agent_stream_timeout,
-            session_id=session_id,
-            workload=workload,
-        ):
-            if not _round_first_event_logged:
-                _round_first_event_logged = True
-                logger.info(
-                    "[agent-timing] first_event round=%s elapsed=%.3fs kind=%s",
-                    round_num,
-                    time.time() - _round_start,
-                    "error" if chunk.startswith("event: error") else "data",
-                )
-            if time.time() > _round_deadline:
-                logger.warning(
-                    "[agent-timing] round_deadline round=%s elapsed=%.3fs deadline_s=%s",
-                    round_num,
-                    time.time() - _round_start,
-                    max(agent_stream_timeout * 4, 1200),
-                )
-                break
-            # Forward error events from stream_llm to the frontend
-            if chunk.startswith("event: error"):
-                logger.warning(
-                    "[agent-timing] stream_error round=%s elapsed=%.3fs chunk=%r",
-                    round_num,
-                    time.time() - _round_start,
-                    chunk[:500],
-                )
-                yield chunk
-                continue
-            if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
-                try:
-                    data = json.loads(chunk[6:])
-                    # IMPORTANT: check type-based events BEFORE "delta" key,
-                    # because tool_call_delta also has an "arg_delta" field.
-                    if data.get("type") == "tool_call_delta":
-                        if tool_policy and tool_policy.blocks(data.get("name")):
-                            continue
-                        # Stream document content to frontend as AI generates it
-                        logger.debug(f"tool_call_delta: name={data.get('name')}, len(arg_delta)={len(data.get('arg_delta', ''))}")
-                        _doc_acc += data.get("arg_delta", "")
-                        if not _doc_opened:
-                            tm = re.search(r'"title"\s*:\s*"((?:[^"\\]|\\.)*)"', _doc_acc)
-                            if tm:
-                                _doc_opened = True
-                                try:
-                                    title = json.loads('"' + tm.group(1) + '"')
-                                except Exception:
-                                    title = tm.group(1)
-                                lm = re.search(r'"language"\s*:\s*"((?:[^"\\]|\\.)*)"', _doc_acc)
-                                lang = ""
-                                if lm:
-                                    try:
-                                        lang = json.loads('"' + lm.group(1) + '"')
-                                    except Exception:
-                                        lang = lm.group(1)
-                                logger.info(f"Doc streaming: open title={title!r} lang={lang!r}")
-                                yield f'data: {json.dumps({"type": "doc_stream_open", "title": title, "language": lang})}\n\n'
-                        if _doc_opened:
-                            cm = re.search(r'"content"\s*:\s*"', _doc_acc)
-                            if cm:
-                                raw = _doc_acc[cm.end():]
-                                raw = re.sub(r'"\s*\}\s*$', '', raw)
-                                try:
-                                    decoded = json.loads('"' + raw + '"')
-                                except Exception:
-                                    try:
-                                        decoded = json.loads('"' + raw.rstrip('\\') + '"')
-                                    except Exception:
-                                        decoded = raw.replace('\\n', '\n').replace('\\t', '\t').replace('\\"', '"').replace('\\\\', '\\')
-                                if len(decoded) > _doc_last_len:
-                                    _doc_last_len = len(decoded)
-                                    yield f'data: {json.dumps({"type": "doc_stream_delta", "content": decoded})}\n\n'
-                    elif data.get("type") == "tool_calls":
-                        native_tool_calls = data.get("calls", [])
-                        logger.info(f"Agent round {round_num}: received {len(native_tool_calls)} native tool call(s)")
-                    elif data.get("type") == "usage":
-                        u = data.get("data", {})
-                        actual_model = u.get("model") or actual_model
-                        round_input = u.get("input_tokens", 0)
-                        real_input_tokens += round_input
-                        real_output_tokens += u.get("output_tokens", 0)
-                        last_round_input_tokens = round_input
-                        has_real_usage = True
-                        # Backend-reported TRUE generation speed (llama.cpp
-                        # timings.predicted_per_second) — pure decode, excludes
-                        # prefill/network. Preferred over tokens/wall-clock, which
-                        # reads low. Keep the last round's value (the gen phase).
-                        if u.get("gen_tps"):
-                            backend_gen_tps = u["gen_tps"]
-                        if u.get("prefill_tps"):
-                            backend_prefill_tps = u["prefill_tps"]
-                    elif data.get("type") == "fallback":
-                        # The selected model failed and another answered; surface
-                        # the notice so a misconfigured provider isn't masked.
-                        actual_model = data.get("answered_by") or actual_model
-                        logger.warning(f"[agent] round {round_num} fell back: "
-                                       f"{data.get('selected_model')} -> {data.get('answered_by')}")
-                        yield chunk
-                    elif data.get("type") == "model_actual":
-                        actual_model = data.get("model") or actual_model
-                        data["requested_model"] = requested_model
-                        yield f"data: {json.dumps(data)}\n\n"
-                    elif "delta" in data:
-                        if not first_token_received:
-                            time_to_first_token = time.time() - total_start
-                            first_token_received = True
-                        if not _round_first_token_logged:
-                            _round_first_token_logged = True
-                            logger.info(
-                                "[agent-timing] first_visible_token round=%s elapsed=%.3fs total_elapsed=%.3fs thinking=%s",
-                                round_num,
-                                time.time() - _round_start,
-                                time.time() - total_start,
-                                bool(data.get("thinking")),
-                            )
-                        # Keep reasoning deltas in a separate accumulator so
-                        # we can echo them back via `reasoning_content` on the
-                        # next request (DeepSeek requires this; harmless for
-                        # other vendors). Regular content still flows into
-                        # round_response unchanged.
-                        if data.get("thinking"):
-                            round_reasoning += data["delta"]
-                        else:
-                            _delta_text = (
-                                _strip_doc_model_artifacts(data["delta"])
-                                if _ody_qwen_finetune_model
-                                else data["delta"]
-                            )
-                            round_response += _delta_text
-                            full_response += _delta_text
-                            data["delta"] = _delta_text
-                        if not _ody_qwen_finetune_model or data.get("thinking"):
-                            yield f"data: {json.dumps(data)}\n\n"
-                        # Detect text-fence doc streaming. Normal agent prompts
-                        # use ```create_document; the doc LoRA streaming path
-                        # uses neutral ```document to avoid triggering learned
-                        # hidden native tool-call output.
-                        if (
-                            (round_num > 1 or _ody_doc_stream_create_mode)
-                            and not _doc_acc
-                            and not (tool_policy and tool_policy.blocks("create_document"))
-                        ):
-                            _fence_markers = (
-                                ('```document\n', '```documen\n')
-                                if _ody_doc_stream_create_mode
-                                else ('```create_document\n',)
-                            )
-                            _fence_marker = None
-                            for _mk in _fence_markers:
-                                _candidate = _mk[0] if isinstance(_mk, tuple) else _mk
-                                if _candidate in round_response[_doc_scan_from:]:
-                                    _fence_marker = _candidate
-                                    break
-                            # Open a new block if we're not currently inside one
-                            # and there's an unstreamed marker in the response.
-                            # The marker search starts at the byte after the
-                            # last block's closing fence so the SECOND
-                            # `create_document` block in the same round gets
-                            # detected (previously only the first one was
-                            # streamed and the rest were silently dropped).
-                            if not _doc_opened and _fence_marker:
-                                _fi = round_response.index(_fence_marker, _doc_scan_from)
-                                _fa = round_response[_fi + len(_fence_marker):]
-                                _fl = _fa.split('\n')
-                                if _fl and _fl[0].strip():
-                                    _doc_opened = True
-                                    _ft = _fl[0].strip()
-                                    _kl = {'python','py','javascript','js','typescript','ts','html','css','json','yaml','bash','sql','rust','go','java','c','cpp','markdown','text'}
-                                    _flang = _fl[1].strip() if len(_fl) > 1 and _fl[1].strip().lower() in _kl else ''
-                                    _doc_fence_offset = _fi + len(_fence_marker) + len(_fl[0]) + 1
-                                    if _flang:
-                                        _doc_fence_offset += len(_fl[1]) + 1
-                                    _doc_last_len = 0
-                                    yield f'data: {json.dumps({"type": "doc_stream_open", "title": _ft, "language": _flang})}\n\n'
-                            if _doc_opened:
-                                _rc = round_response[_doc_fence_offset:]
-                                _ci = _rc.find('\n```')
-                                if _ci >= 0:
-                                    _rc = _rc[:_ci]
-                                if len(_rc) > _doc_last_len:
-                                    _doc_last_len = len(_rc)
-                                    yield f'data: {json.dumps({"type": "doc_stream_delta", "content": _rc})}\n\n'
-                                # If the closing fence has arrived, finalise
-                                # this block and arm detection of the NEXT
-                                # one. The model can emit multiple
-                                # `create_document` blocks in a single round.
-                                if _ci >= 0:
-                                    _doc_opened = False
-                                    _doc_scan_from = _doc_fence_offset + _ci + len('\n```')
-                                    _doc_fence_offset = 0
-                                    _doc_last_len = 0
-                    elif data.get("error"):
-                        err_msg = data.get("error", "unknown")
-                        logger.error(f"Agent round {round_num}: stream error: {err_msg}")
-                        yield f'data: {json.dumps({"delta": chr(10) + chr(10) + "*[Stream error: " + str(err_msg) + "]*"})}\n\n'
-                except json.JSONDecodeError:
-                    if round_num == 1:
-                        yield chunk
-            elif chunk.startswith("event: "):
-                # Forward error events to frontend as visible text
-                yield chunk
-            # Intercept [DONE] — don't forward until all rounds finish
-
-        logger.info(
-            "[agent-timing] round_stream_done round=%s elapsed=%.3fs text_chars=%s tool_calls=%s first_event=%s first_token=%s",
-            round_num,
-            time.time() - _round_start,
-            len(round_response),
-            len(native_tool_calls),
-            _round_first_event_logged,
-            _round_first_token_logged,
-        )
-        _normalized_doc_round = (
-            _normalize_stream_document_fences(
-                round_response,
-                "create_document" if _ody_doc_stream_create_mode else "update_document",
-            )
-            if _ody_doc_finetune_mode
-            else round_response
-        )
-        tool_blocks, used_native, converted_calls = _resolve_tool_blocks(
-            _normalized_doc_round,
-            native_tool_calls,
-            round_num,
-            is_api_model=(_is_api_model and not guide_only),
-            # SAO: prefer native, but still accept fenced blocks if model falls back
-            # (or document LoRA path which is fence-only).
-            allow_fenced_for_api=(_ody_doc_finetune_mode or _allow_fenced_fallback),
-        )
-        if _ody_doc_stream_create_mode and tool_blocks:
-            create_idx = next(
-                (idx for idx, block in enumerate(tool_blocks) if block.tool_type == "create_document"),
-                None,
-            )
-            if create_idx is None:
-                logger.info(
-                    "[agent] odysseus doc stream-create discarded non-create tool call(s): %s",
-                    [block.tool_type for block in tool_blocks],
-                )
-                tool_blocks = []
-                converted_calls = []
-            else:
-                if len(tool_blocks) > 1 or create_idx != 0:
-                    logger.info(
-                        "[agent] odysseus doc stream-create keeping first create_document and dropping extras: %s",
-                        [block.tool_type for block in tool_blocks],
-                    )
-                tool_blocks = [tool_blocks[create_idx]]
-                converted_calls = (
-                    [converted_calls[create_idx]]
-                    if create_idx < len(converted_calls)
-                    else converted_calls[:1]
-                )
-
-        if _ody_qwen_finetune_model and tool_blocks:
-            _allowed_memory_write_actions = {"add", "edit", "update", "delete", "delete_all"}
-            _explicit_memory_browse = bool(re.search(
-                r"\b(search|list|show|open|view)\b.{0,40}\b(memories|memory|brain)\b",
-                _last_user.lower(),
-            ))
-            _filtered_tool_blocks = []
-            _filtered_converted_calls = []
-            _dropped_memory_lookup = False
-            for _idx, _block in enumerate(tool_blocks):
-                if _block.tool_type != "manage_memory":
-                    _filtered_tool_blocks.append(_block)
-                    if _idx < len(converted_calls):
-                        _filtered_converted_calls.append(converted_calls[_idx])
-                    continue
-                _action = ""
-                try:
-                    _args = json.loads(_block.content or "{}")
-                    if isinstance(_args, dict):
-                        _action = str(_args.get("action") or "").lower()
-                except Exception:
-                    _action = ""
-                if _action in {"list", "search", "view", "get", "read"} and not _explicit_memory_browse:
-                    _dropped_memory_lookup = True
-                elif _action in _allowed_memory_write_actions and re.search(
-                    r"\b(remember|forget|preference|prefer|save this about me|update memory|delete memory)\b",
-                    _last_user.lower(),
-                ):
-                    _filtered_tool_blocks.append(_block)
-                    if _idx < len(converted_calls):
-                        _filtered_converted_calls.append(converted_calls[_idx])
-                else:
-                    _dropped_memory_lookup = True
-            if _dropped_memory_lookup:
-                logger.info(
-                    "[agent-intent] odysseus qwen dropped manage_memory lookup; answering from compact memory"
-                )
-                tool_blocks = _filtered_tool_blocks
-                converted_calls = _filtered_converted_calls
-                if used_native:
-                    native_tool_calls = _filtered_converted_calls
-                if not tool_blocks:
-                    _force_answer = True
-                    messages.append({
-                        "role": "system",
-                        "content": (
-                            "Answer the user's identity/personal-memory question from the compact "
-                            "saved memory facts already provided. Do not call manage_memory or any tool."
-                        ),
-                    })
-                    yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
-                    continue
-
-        # Force-answer round: we told the model to STOP calling tools and
-        # answer. If it ignored that and emitted a (possibly DSML) tool
-        # call anyway, discard it — don't execute, don't re-loop. Keep
-        # only the prose; if there's none, emit a graceful fallback.
-        if _force_answer:
-            if tool_blocks:
-                logger.info(f"[agent] force-answer round {round_num}: discarding {len(tool_blocks)} ignored tool call(s)")
-            tool_blocks = []
-            if not _strip_think_blocks(strip_tool_blocks(round_response)).strip():
-                # The model burned its budget gathering data but never wrote a
-                # final answer (common with weaker models on multi-source
-                # briefings). Salvage it: one blunt non-streaming synthesis call
-                # over the full conversation (which already holds every tool
-                # result) before falling back to the canned apology.
-                _synth = ""
-                try:
-                    from src.llm_core import llm_call_async
-                    _synth_messages = list(messages) + [{
-                        "role": "user",
-                        "content": (
-                            "Using ONLY the information already gathered above, write "
-                            "the final answer for the user now. Do NOT call any tools, "
-                            "do NOT explain your reasoning — output the finished response "
-                            "directly. If some data couldn't be fetched, just work with "
-                            "what you have and note what's missing in one short line."
-                        ),
-                    }]
-                    _raw = await llm_call_async(
-                        url=endpoint_url, model=model, messages=_synth_messages,
-                        headers=headers, temperature=0.3, max_tokens=max_tokens, timeout=60,
-                    )
-                    _synth = _strip_think_blocks(strip_tool_blocks(_raw or "")).strip()
-                except Exception as _e:
-                    logger.warning(f"[agent] grace synthesis failed: {_e}")
-                if _synth:
-                    yield f'data: {json.dumps({"delta": _synth})}\n\n'
-                    full_response += _synth
-                else:
-                    _fb = ("I gathered some search results but couldn't pull a clean "
-                           "answer together. Want me to try a more specific question, "
-                           "or summarize what I did find?")
-                    yield f'data: {json.dumps({"delta": _fb})}\n\n'
-                    full_response += _fb
 
         # ── Fallback: auto-create document if model dumped large code in chat ──
         # If no create_document tool was used, check for big code blocks in text
@@ -1358,223 +594,36 @@ async def stream_agent_loop(
         # on reload (#3222 follow-up).
         cleaned_round = strip_tool_blocks(round_response, skip_fenced=(_is_api_model and not used_native and not guide_only)).strip()
         round_texts.append(cleaned_round)
-        if _ody_qwen_finetune_model and not tool_blocks and cleaned_round:
-            yield f'data: {json.dumps({"delta": cleaned_round})}\n\n'
-
         if not tool_blocks:
-            # --- Auto Continue Nudge (Hermes core style) ---
-            # Jika user meminta task multi-step tapi model berhenti tanpa tool (hanya menulis teks),
-            # dan task jelas belum tuntas (masih butuh command eksekusi), kita paksa loop lanjut.
-            _continue_nudge_words = ["selanjutnya", "kemudian", "akan saya", "langkah", "berikutnya", "saya harus", "akan mengeksekusi", "akan menjalankan"]
-            _lower_clean = cleaned_round.lower()
-            if any(w in _lower_clean for w in _continue_nudge_words) and not _force_answer:
-                logger.info(f"[agent] force-continue nudge on round {round_num}: model stopped but implies next steps")
-                _note = "\n\n_Auto-continue: mengeksekusi langkah selanjutnya._\n\n"
-                yield f'data: {json.dumps({"delta": _note})}\n\n'
-                full_response += _note
-                messages.append({
-                    "role": "system",
-                    "content": (
-                        "Anda menjelaskan langkah selanjutnya tetapi berhenti tanpa mengeksekusi tool. "
-                        "PANGGIL TOOL SEKARANG untuk melanjutkan pekerjaan. "
-                        "Jangan hanya menjelaskan, segera bertindak menggunakan tool block."
-                    ),
-                })
-                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
-                continue
-
-            # ── Completion verifier (mechanism 3a) ────────────────────
-            # The model is finishing. If this was an effectful agentic turn,
-            # have a fresh-context verifier independently check the work
-            # before we accept "done". On FAIL, surface the issues and let
-            # the model fix them (capped, and it must do new effectful work
-            # to re-trigger). Skipped on force-answer rounds (no tools to
-            # fix with), pure Q&A, and when the toggle is off.
-            _claimed_done = bool(_strip_think_blocks(cleaned_round).strip())
-            if (_effectful_used and not _force_answer
-                    and _claimed_done
-                    and _verifier_rounds < _VERIFIER_MAX_ROUNDS
-                    # Default OFF: on weak local models the verifier can't judge
-                    # from the action-snapshot (no doc body), so it false-rejects
-                    # ("content not shown") and forces a costly extra round every
-                    # effectful turn. Opt-in via setting for strong models.
-                    and get_setting("agent_verifier_subagent", False)):
-                # Brief "working" indicator while the verifier runs.
-                yield f'data: {json.dumps({"type": "agent_step", "round": round_num})}\n\n'
-                _vfail = await _run_verifier_subagent(
-                    _verifier_instruction,
-                    _build_actions_snapshot(tool_events),
-                    endpoint_url=endpoint_url, model=model, headers=headers,
-                )
-                if _vfail:
-                    _verifier_rounds += 1
-                    logger.info(f"[agent] verifier flagged {len(_vfail)} issue(s) on round {round_num}: {_vfail}")
-                    _note = "\n\n_Double-checked the work and found something to fix._\n\n"
-                    yield f'data: {json.dumps({"delta": _note})}\n\n'
-                    full_response += _note
-                    messages.append({
-                        "role": "system",
-                        "content": (
-                            "An independent verifier reviewed your work against the "
-                            "original request and found issues that must be fixed before "
-                            "this is actually done:\n- " + "\n- ".join(_vfail) +
-                            "\n\nFix these now using tools, then finish."
-                        ),
-                    })
-                    # Require fresh effectful work before verifying again, so we
-                    # never re-verify an unchanged state in a loop.
-                    _effectful_used = False
-                    continue
-            # ── Intent-without-action supervisor ─────────────────────
-            # Catch "Let me tail the output" / "I'll check the logs" /
-            # "Let me investigate" patterns where the model announces an
-            # action but emits no tool_call. The bug shows up most on
-            # smaller models trained to verbalize plans before acting.
-            # We inject one sharp nudge ("you said you would X — call the
-            # actual tool now") and loop again. Capped at
-            # _MAX_INTENT_NUDGES so a model that genuinely cannot use the
-            # tool doesn't pin us in a forever loop.
-            _intent_text = _strip_think_blocks(cleaned_round).strip()
-            _intent_match = _INTENT_RE.search(_intent_text) if _intent_text else None
-            # Only nudge when the round REALLY looks like an unfinished
-            # promise: short response (<400 chars), no fenced code/answer,
-            # and an action-intent phrase was matched. Long answers that
-            # happen to contain "let me know" are not stalls.
-            _looks_like_promise = (
-                not guide_only
-                and _intent_match is not None
-                and len(_intent_text) < 400
-                and "```" not in _intent_text
-            )
-            if _looks_like_promise and _intent_nudge_count < _MAX_INTENT_NUDGES:
-                _intent_nudge_count += 1
-                _matched_phrase = _intent_match.group(0).strip()
-                logger.info(f"[agent] intent-without-action nudge #{_intent_nudge_count} on round {round_num}: {_matched_phrase!r}")
-                _lower_phrase = _matched_phrase.lower()
-                _cookbook_log_hint = ""
-                if any(_word in _lower_phrase for _word in ("log", "logs", "output", "tail", "status")):
-                    _cookbook_log_hint = (
-                        " If this is about a Cookbook/model serve, the concrete calls are: "
-                        "`list_served_models` first, then `tail_serve_output` with the "
-                        "session_id from the serve/list result. Never answer with "
-                        "\"check logs\" when those tools are available."
-                    )
-                messages.append({
-                    "role": "system",
-                    "content": (
-                        f"You just wrote: \"{_matched_phrase}\" — but ended the "
-                        "turn without making the actual tool call. The user can "
-                        "see you announced the action but didn't run it, which "
-                        "is the most frustrating thing you can do. "
-                        "DO IT NOW: emit the actual function call this turn. "
-                        f"{_cookbook_log_hint}"
-                        "If you decided not to do it after all, say so plainly in "
-                        "one sentence instead of restating the plan."
-                    ),
-                })
-                # Visible signal in the stream so the user knows we caught it.
-                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
-                continue
-            if _looks_like_promise:
-                _matched_phrase = _intent_match.group(0).strip()
-                _guard_message = (
-                    "The agent stopped because it repeatedly announced a tool "
-                    "action without making the tool call."
-                )
-                logger.warning(
-                    "[agent] intent-without-action guard exhausted on round %d after %d nudges: %r",
-                    round_num,
-                    _intent_nudge_count,
-                    _matched_phrase,
-                )
-                yield (
-                    "data: "
-                    + json.dumps({
-                        "type": "intent_nudge_exhausted",
-                        "reason": "intent_without_action_nudge_cap",
-                        "message": _guard_message,
-                        "round": round_num,
-                        "nudges": _intent_nudge_count,
-                        "matched": _matched_phrase,
-                    })
-                    + "\n\n"
-                )
-                break
             break  # no tools — done
 
-        # ── Loop-breaker (Terminus-style stall detector) ──────────────
-        # Stall detector for repeated no-progress tool loops.
-        # A round is "useless" ONLY when it re-issues a recent tool call AND
-        # writes no answer text — i.e. the model is going in circles.
-        # Genuine exploration (new, distinct calls) is never useless, so
-        # multi-step work (file hunts, multi-host ssh, build→test→fix) rides
-        # all the way to a real answer. We bail only on a streak of useless
-        # rounds, or a single tool fired an absurd number of times (hard
-        # runaway backstop). On bail we don't give up — we force one
-        # tool-free round so the model declares done or declares blocked,
-        # mirroring Terminus's explicit-completion handshake.
+        # ── Loop-breaker (duplicate call safety) ──────────────
+        # Simplified: detect repeated identical tool calls without new text.
+        # Hermes does not need this for strong models, but deepseek-v4-flash
+        # occasionally fires the same web_search with the same args in a loop.
         _sig = "|".join(sorted(f"{b.tool_type}:{(b.content or '').strip()[:120]}" for b in tool_blocks))
         _is_repeat = _sig in _recent_call_sigs
         _recent_call_sigs.append(_sig)
-        for _b in tool_blocks:
-            _call_freq[f"{_b.tool_type}:{(_b.content or '').strip()[:120]}"] += 1
-        # "Real" answer text = round text minus <think> blocks. Empty-think
-        # rounds (just "<think>\n\n</think>" + a tool call) must not read as
-        # progress, so strip think before checking.
         _real_text = _strip_think_blocks(cleaned_round).strip()
-        # Circling = repeating a recent call with nothing written. Any
-        # progress (a NEW distinct call, or actual answer text) resets it.
         if _is_repeat and not _real_text:
             _stuck_rounds += 1
         else:
             _stuck_rounds = 0
-        # Runaway = the SAME exact call repeated an absurd number of times.
-        # Distinct calls to one tool (a real batch) are legitimate work, so we
-        # count identical call signatures, not raw per-tool-type totals.
-        _runaway = _detect_runaway_call(_call_freq)
-        # Discipline: trip after 2 stuck rounds (was 4) or runaway sig
-        if _stuck_rounds >= 2 or _runaway:
-            reason = (f"calling {_runaway} with identical arguments over and over" if _runaway
-                      else "repeating the same tool calls without new progress")
-            logger.warning(f"[agent] loop-breaker tripped on round {round_num} ({reason}); sig={_sig[:80]!r}")
-            yield (
-                "data: "
-                    + json.dumps({
-                    "type": "loop_breaker_triggered",
-                    "reason": "loop_breaker_stall",
-                    "message": (
-                        "The loop-breaker detected repeated tool calls without "
-                        "new progress, so the agent is being forced to stop "
-                        "using tools and give its best final answer."
-                    ),
-                    "round": round_num,
-                    "detail": reason,
-                })
-                + "\n\n"
-            )
-            # The model has been executing tools, so its results are already
-            # in context. Force ONE tool-free round to converge: write the
-            # answer from what it has, or state plainly what's blocking it.
-            # The force-answer handler above salvages (grace synthesis) or
-            # apologizes honestly if it still writes nothing.
-            _off = [t for t in ("web_search", "bash")
-                    if disabled_tools and t in disabled_tools]
-            _off_note = (f" ({', '.join(_off)} is currently disabled — say so if "
-                         f"you needed it.)" if _off else "")
+        if _stuck_rounds >= 3:
+            logger.warning(f"[agent] loop-breaker tripped on round {round_num}; repeated same tool call without new text")
             _force_answer = True
             messages.append({
                 "role": "system",
                 "content": (
-                    "You're repeating tool calls without converging. STOP calling "
-                    "tools and end the turn one of two ways: (a) write your best "
-                    "final answer NOW from the information already gathered, or "
-                    "(b) if you're genuinely blocked, say plainly what's blocking "
-                    "you in a sentence or two." + _off_note
+                    "You are repeating the same tool call without new progress. "
+                    "STOP calling tools and write your best final answer NOW "
+                    "from the information already gathered."
                 ),
             })
-            full_response += "\n\n"
             yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
             continue
+        
+
 
         # Pre-stream document content for fenced tool blocks (non-native path)
         # Native path already streamed via tool_call_delta above
@@ -2066,23 +1115,6 @@ async def stream_agent_loop(
         if _awaiting_user:
             break
 
-        if _doc_stream_create_completed:
-            if not full_response.strip():
-                full_response = "Done."
-                yield 'data: ' + json.dumps({"delta": "Done."}) + '\n\n'
-            logger.info("[agent] odysseus doc stream-create completed after one create_document")
-            break
-
-        if _ody_doc_tool_completed:
-            if not full_response.strip() or full_response.strip().startswith("```"):
-                full_response = "Done."
-                yield 'data: ' + json.dumps({"delta": "Done."}) + '\n\n'
-            logger.info("[agent] odysseus doc tool completed after one textual tool block")
-            break
-
-        if _ody_notes_finetune_mode and _ody_notes_tool_completed:
-            logger.info("[agent] odysseus notes completed from deterministic tool output")
-            break
 
         # Feed results back to LLM for next round
         # Pass the CONVERTED calls (aligned 1:1 with tool_result_texts), not the

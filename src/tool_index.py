@@ -346,9 +346,9 @@ class ToolIndex:
         # request (e.g. "visit <url> and tell me the title"), force-including the
         # whole email toolset and crowding out the relevant tools — the model then
         # believed it had only email tools and refused web/other tasks (#1707).
-        frozenset({"email", "emails", "mail", "mails", "gmail", "googlemail", "message", "messages", "send", "reply", "replies", "inbox", "unread"}):
+        frozenset({"email", "emails", "mail", "mails", "gmail", "googlemail", "message", "messages", "send", "reply", "replies", "inbox", "unread", "surat", "pesan", "kirim", "balas", "surel"}):
             {"list_email_accounts", "list_emails", "read_email", "send_email", "reply_to_email", "bulk_email", "delete_email", "archive_email", "mark_email_read", "resolve_contact", "ui_control"},
-        frozenset({"calendar", "event", "meeting", "schedule", "appointment"}):
+        frozenset({"calendar", "event", "meeting", "schedule", "appointment", "kalender", "jadwal", "acara", "pertemuan", "rapat"}):
             {"manage_calendar"},
         # Detached background `bash` jobs (#!bg): check on / read output / kill.
         frozenset({"background job", "background jobs", "bg job", "bg jobs",
@@ -356,7 +356,7 @@ class ToolIndex:
                    "check on that job", "job output", "kill the job",
                    "kill the background", "stop the background", "running job"}):
             {"manage_bg_jobs"},
-        frozenset({"note", "todo", "reminder", "remind", "checklist", "remember to"}):
+        frozenset({"note", "todo", "reminder", "remind", "checklist", "remember to", "catatan", "tugas", "daftar", "ingatkan", "pengingat"}):
             {"manage_notes"},
         # Chat/session management. "rename" alone maps to documents below, so a
         # request like "rename the last 12 sessions/chats" needs these session
@@ -367,16 +367,17 @@ class ToolIndex:
                    "rename the chat", "rename my chat", "rename the session",
                    "archive chat", "archive session", "delete chat",
                    "delete session", "fork chat", "fork session",
-                   "name the chats", "name my chats", "rename them"}):
+                   "name the chats", "name my chats", "rename them", "percakapan", "sesi", "riwayat"}):
             {"list_sessions", "manage_session"},
         frozenset({"recurring", "every day", "every hour", "every morning",
                    "every evening", "every night", "every week", "each morning",
                    "daily task", "background task", "scheduled task", "schedule a",
                    "automatically", "auto-summarize", "auto summarize",
                    "cron", "periodically", "on a schedule", "set up a task",
-                   "create a task", "summarize my inbox every", "remind me every"}):
+                   "create a task", "summarize my inbox every", "remind me every",
+                   "terjadwal", "rutin", "setiap", "otomatis"}):
             {"manage_tasks"},
-        frozenset({"contact", "address", "phone", "who is"}):
+        frozenset({"contact", "address", "phone", "who is", "kontak", "alamat", "nomor", "siapa"}):
             {"resolve_contact", "manage_contact"},
         frozenset({"save contact", "add contact", "new contact", "update contact",
                    "edit contact", "delete contact", "remove contact",
@@ -392,7 +393,8 @@ class ToolIndex:
                    "save this one for", "save that for",
                    # Postal-address-like signals
                    "postal code", "zip code", "street address",
-                   "mailing address", "their address"}):
+                   "mailing address", "their address",
+                   "simpan kontak", "tambah kontak", "nomor baru"}):
             {"manage_contact"},
         # "Ask another model" intent → chat_with_model relays to a
         # different model and returns its answer. ask_teacher escalates
@@ -401,18 +403,19 @@ class ToolIndex:
                    "ask minimax", "ask qwen", "ask the", "ask another model",
                    "what does", "what would", "second opinion", "other model",
                    "different model", "compare answers", "compare models",
-                   "delegate to", "have model"}):
+                   "delegate to", "have model", "tanya model", "tanya gpt"}):
             {"chat_with_model", "ask_teacher", "list_models"},
         # Deep research intent (incl. common typo "reserach")
         frozenset({"web search", "search the web", "search online", "look up",
                    "find info online", "find information online",
                    "find info", "find information", "online about",
                    "on the internet", "google", "latest", "current", "news",
-                   "weather", "forecast", "stock price", "price of"}):
+                   "weather", "forecast", "stock price", "price of",
+                   "cari online", "telusuri", "googling", "info terbaru", "berita", "cuaca"}):
             {"web_search", "web_fetch"},
         frozenset({"research", "reserach", "reasearch", "look into", "investigate",
                    "deep dive", "deep research", "find out about", "study up on",
-                   "report on", "do research", "look up everything"}):
+                   "report on", "do research", "look up everything", "riset", "teliti"}):
             {"trigger_research"},
         # Settings-change intent — "change my…/set my…/use X for…/turn on…".
         frozenset({"change my", "set my", "use the voice", "change the voice",
