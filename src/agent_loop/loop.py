@@ -1362,6 +1362,27 @@ async def stream_agent_loop(
             yield f'data: {json.dumps({"delta": cleaned_round})}\n\n'
 
         if not tool_blocks:
+            # --- Auto Continue Nudge (Hermes core style) ---
+            # Jika user meminta task multi-step tapi model berhenti tanpa tool (hanya menulis teks),
+            # dan task jelas belum tuntas (masih butuh command eksekusi), kita paksa loop lanjut.
+            _continue_nudge_words = ["selanjutnya", "kemudian", "akan saya", "langkah", "berikutnya", "saya harus", "akan mengeksekusi", "akan menjalankan"]
+            _lower_clean = cleaned_round.lower()
+            if any(w in _lower_clean for w in _continue_nudge_words) and not _force_answer:
+                logger.info(f"[agent] force-continue nudge on round {round_num}: model stopped but implies next steps")
+                _note = "\n\n_Auto-continue: mengeksekusi langkah selanjutnya._\n\n"
+                yield f'data: {json.dumps({"delta": _note})}\n\n'
+                full_response += _note
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "Anda menjelaskan langkah selanjutnya tetapi berhenti tanpa mengeksekusi tool. "
+                        "PANGGIL TOOL SEKARANG untuk melanjutkan pekerjaan. "
+                        "Jangan hanya menjelaskan, segera bertindak menggunakan tool block."
+                    ),
+                })
+                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                continue
+
             # ── Completion verifier (mechanism 3a) ────────────────────
             # The model is finishing. If this was an effectful agentic turn,
             # have a fresh-context verifier independently check the work
