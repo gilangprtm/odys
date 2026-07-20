@@ -70,10 +70,8 @@ from src.agent_loop.helpers import (
     _is_email_document_obj,
     _minimal_saved_memory_message,
     _compact_email_draft_context,
-                        _strip_doc_model_artifacts,
-    _normalize_truncated_document_tool_fences,
-    _normalize_stream_document_fences,
-    _recent_context_for_retrieval,
+                            _normalize_truncated_document_tool_fences,
+        _recent_context_for_retrieval,
     _build_system_prompt,
     _ADMIN_TOOLS,
     _CASUAL_OPENING_RE,
@@ -205,16 +203,11 @@ async def stream_agent_loop(
     prep_timings["request_setup"] = time.time() - _t0
 
     # Tool Selection (Hermes style)
-    # Odys used to run RAG + keyword fallbacks here. Hermes upstream just passes
-    # ALL active tools so the model has its full capabilities.
     _relevant_tools = relevant_tools
     _t1 = time.time()
-    
     if _relevant_tools:
         logger.info(f"[tool-selection] Using caller-provided relevant_tools ({len(_relevant_tools)} tools)")
     else:
-        # Default: all tools are relevant. `disabled_tools` (from toolsets or policy)
-        # will filter them out later before they reach the model.
         from src.tool_schemas import FUNCTION_TOOL_SCHEMAS
         _relevant_tools = {
             s["function"]["name"] for s in FUNCTION_TOOL_SCHEMAS
@@ -222,7 +215,6 @@ async def stream_agent_loop(
         }
         logger.info(f"[tool-selection] All {len(_relevant_tools)} tools provided to agent")
 
-    # If this turn targets the open document, keep editing tools available
     if _active_document_relevant:
         _relevant_tools.update({"edit_document", "update_document", "suggest_document"})
         if _active_email_draft_relevant:
@@ -335,7 +327,6 @@ async def stream_agent_loop(
         suppress_skills=_low_signal_turn,
         active_email=active_email,
     )
-
     if plan_mode and not guide_only:
         # Steer the model to investigate-then-propose. Hard tool gating handles
         # every write path except shell; this directive is what keeps the
@@ -438,9 +429,6 @@ async def stream_agent_loop(
     # Completion-verifier state (mechanism 3a). _effectful_used flips on when
     # a tool that produces a checkable artifact runs; the verifier only fires
     # on such turns and at most _VERIFIER_MAX_ROUNDS times.
-    _effectful_used = False
-    _verifier_rounds = 0
-    _verifier_instruction = _extract_last_user_message(messages)
     real_input_tokens = 0   # Accumulated real usage from API
     real_output_tokens = 0
     last_round_input_tokens = 0  # Last round's input tokens (for context % peak)
@@ -463,8 +451,16 @@ async def stream_agent_loop(
     # backstop. Counting identical repeats — not distinct same-tool calls —
     # lets a legit batch (e.g. 18 calendar events at once) through.
     _call_freq: collections.Counter = collections.Counter()
-    _force_answer = False
-    _awaiting_user = False  # set by ask_user → end the turn and wait for a choice
+    _force_answer = False  # set by loop-breaker → next round runs with NO tools
+    # Supervisor: how many times we've nudged the model after it announced
+    # an action without emitting the tool call. Capped to prevent a model
+    # that *can't* call the tool from looping forever.    # "I said I would, then didn't" detector. The pattern that breaks debug
+    # loops on weak models (deepseek-v4-flash mid-2026): the model writes
+    # "Let me tail the output to see the error" and then ends the turn with
+    # no tool_calls. The intent is sincere but the function call gets dropped.
+    # Match the common phrasings + an action verb that maps to an available
+    # tool, so we don't nudge on harmless transitional text like "let me
+    # know what you think".    _awaiting_user = False  # set by ask_user → end the turn and wait for a choice
 
     # Document streaming state (persists across rounds)
     _doc_acc = ""          # accumulated tool-call JSON arguments
@@ -489,12 +485,22 @@ async def stream_agent_loop(
         # detect a SUBSEQUENT block in the same round.
         _doc_scan_from = 0
 
+        # Merge native tool schemas with MCP tool schemas, filtering out
         # Only send function schemas for API models (OpenAI, Anthropic, etc.).
         # Local models use fenced code blocks or <tool_code> — schemas add overhead.
         if _force_answer:
+            # Loop-breaker decided the model has enough info but keeps
+            # calling tools. Send NO tools this round so it's forced to
+            # write the answer instead of flailing further.
             all_tool_schemas = []
         elif _is_api_model:
+            # Filter schemas by RAG-selected tools (if available)
             if _relevant_tools:
+                # _build_base_prompt unions _ADMIN_TOOLS into the prompt
+                # sections when admin intent fires — the schema list must
+                # offer the same names, or the model reads prose describing
+                # tools it cannot call and substitutes the nearest schema
+                # it does have (e.g. manage_memory for manage_skills).
                 _schema_names = set(_relevant_tools)
                 if _needs_admin:
                     _schema_names |= _ADMIN_TOOLS
@@ -524,6 +530,297 @@ async def stream_agent_loop(
             _last_content = _last_user.lower()
             _wants_mcp = any(kw in _last_content for kw in _MCP_KEYWORDS)
             all_tool_schemas = mcp_schemas if (_wants_mcp and mcp_schemas) else []
+        agent_stream_timeout = int(get_setting("agent_stream_timeout_seconds", 300) or 300)
+
+        _tool_names_sent = [t.get("function", {}).get("name") for t in (all_tool_schemas or []) if t.get("function")]
+        logger.info(f"[agent-debug] round={round_num} model={model} _is_api_model={_is_api_model} tools_sent={len(_tool_names_sent)} tool_names={_tool_names_sent[:15]} relevant_tools={sorted(_relevant_tools)[:15] if _relevant_tools else 'ALL'}")
+
+        # Primary target + any configured fallback models. stream_llm_with_fallback
+        # only switches on a pre-content failure, so streamed output is never
+        # duplicated; the dead-host cooldown keeps repeat primary attempts cheap.
+        _candidates = [(endpoint_url, model, headers)] + list(fallbacks or [])
+        # stream_llm enforces a per-read INACTIVITY timeout (httpx read=timeout),
+        # which kills a wedged/silent endpoint. This wall-clock deadline is the
+        # complementary cap for the rare stream that trickles bytes forever and
+        # so never trips the inactivity timeout. Generous — only catches runaway.
+        _round_deadline = time.time() + max(agent_stream_timeout * 4, 1200)
+        _round_start = time.time()
+        _round_first_event_logged = False
+        _round_first_token_logged = False
+        logger.info(
+            "[agent-timing] round_start round=%s model=%s endpoint=%s prompt_tokens=%s tools=%s native_tools=%s timeout=%s",
+            round_num,
+            model,
+            endpoint_url,
+            estimate_tokens(messages),
+            len(_tool_names_sent),
+            bool(all_tool_schemas),
+            agent_stream_timeout,
+        )
+        async for chunk in stream_llm_with_fallback(
+            _candidates,
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            prompt_type=prompt_type if round_num == 1 else None,
+            tools=all_tool_schemas if all_tool_schemas else None,
+            timeout=agent_stream_timeout,
+            session_id=session_id,
+            workload=workload,
+        ):
+            if not _round_first_event_logged:
+                _round_first_event_logged = True
+                logger.info(
+                    "[agent-timing] first_event round=%s elapsed=%.3fs kind=%s",
+                    round_num,
+                    time.time() - _round_start,
+                    "error" if chunk.startswith("event: error") else "data",
+                )
+            if time.time() > _round_deadline:
+                logger.warning(
+                    "[agent-timing] round_deadline round=%s elapsed=%.3fs deadline_s=%s",
+                    round_num,
+                    time.time() - _round_start,
+                    max(agent_stream_timeout * 4, 1200),
+                )
+                break
+            # Forward error events from stream_llm to the frontend
+            if chunk.startswith("event: error"):
+                logger.warning(
+                    "[agent-timing] stream_error round=%s elapsed=%.3fs chunk=%r",
+                    round_num,
+                    time.time() - _round_start,
+                    chunk[:500],
+                )
+                yield chunk
+                continue
+            if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
+                try:
+                    data = json.loads(chunk[6:])
+                    # IMPORTANT: check type-based events BEFORE "delta" key,
+                    # because tool_call_delta also has an "arg_delta" field.
+                    if data.get("type") == "tool_call_delta":
+                        if tool_policy and tool_policy.blocks(data.get("name")):
+                            continue
+                        # Stream document content to frontend as AI generates it
+                        logger.debug(f"tool_call_delta: name={data.get('name')}, len(arg_delta)={len(data.get('arg_delta', ''))}")
+                        _doc_acc += data.get("arg_delta", "")
+                        if not _doc_opened:
+                            tm = re.search(r'"title"\s*:\s*"((?:[^"\\]|\\.)*)"', _doc_acc)
+                            if tm:
+                                _doc_opened = True
+                                try:
+                                    title = json.loads('"' + tm.group(1) + '"')
+                                except Exception:
+                                    title = tm.group(1)
+                                lm = re.search(r'"language"\s*:\s*"((?:[^"\\]|\\.)*)"', _doc_acc)
+                                lang = ""
+                                if lm:
+                                    try:
+                                        lang = json.loads('"' + lm.group(1) + '"')
+                                    except Exception:
+                                        lang = lm.group(1)
+                                logger.info(f"Doc streaming: open title={title!r} lang={lang!r}")
+                                yield f'data: {json.dumps({"type": "doc_stream_open", "title": title, "language": lang})}\n\n'
+                        if _doc_opened:
+                            cm = re.search(r'"content"\s*:\s*"', _doc_acc)
+                            if cm:
+                                raw = _doc_acc[cm.end():]
+                                raw = re.sub(r'"\s*\}\s*$', '', raw)
+                                try:
+                                    decoded = json.loads('"' + raw + '"')
+                                except Exception:
+                                    try:
+                                        decoded = json.loads('"' + raw.rstrip('\\') + '"')
+                                    except Exception:
+                                        decoded = raw.replace('\\n', '\n').replace('\\t', '\t').replace('\\"', '"').replace('\\\\', '\\')
+                                if len(decoded) > _doc_last_len:
+                                    _doc_last_len = len(decoded)
+                                    yield f'data: {json.dumps({"type": "doc_stream_delta", "content": decoded})}\n\n'
+                    elif data.get("type") == "tool_calls":
+                        native_tool_calls = data.get("calls", [])
+                        logger.info(f"Agent round {round_num}: received {len(native_tool_calls)} native tool call(s)")
+                    elif data.get("type") == "usage":
+                        u = data.get("data", {})
+                        actual_model = u.get("model") or actual_model
+                        round_input = u.get("input_tokens", 0)
+                        real_input_tokens += round_input
+                        real_output_tokens += u.get("output_tokens", 0)
+                        last_round_input_tokens = round_input
+                        has_real_usage = True
+                        # Backend-reported TRUE generation speed (llama.cpp
+                        # timings.predicted_per_second) — pure decode, excludes
+                        # prefill/network. Preferred over tokens/wall-clock, which
+                        # reads low. Keep the last round's value (the gen phase).
+                        if u.get("gen_tps"):
+                            backend_gen_tps = u["gen_tps"]
+                        if u.get("prefill_tps"):
+                            backend_prefill_tps = u["prefill_tps"]
+                    elif data.get("type") == "fallback":
+                        # The selected model failed and another answered; surface
+                        # the notice so a misconfigured provider isn't masked.
+                        actual_model = data.get("answered_by") or actual_model
+                        logger.warning(f"[agent] round {round_num} fell back: "
+                                       f"{data.get('selected_model')} -> {data.get('answered_by')}")
+                        yield chunk
+                    elif data.get("type") == "model_actual":
+                        actual_model = data.get("model") or actual_model
+                        data["requested_model"] = requested_model
+                        yield f"data: {json.dumps(data)}\n\n"
+                    elif "delta" in data:
+                        if not first_token_received:
+                            time_to_first_token = time.time() - total_start
+                            first_token_received = True
+                        if not _round_first_token_logged:
+                            _round_first_token_logged = True
+                            logger.info(
+                                "[agent-timing] first_visible_token round=%s elapsed=%.3fs total_elapsed=%.3fs thinking=%s",
+                                round_num,
+                                time.time() - _round_start,
+                                time.time() - total_start,
+                                bool(data.get("thinking")),
+                            )
+                        # Keep reasoning deltas in a separate accumulator so
+                        # we can echo them back via `reasoning_content` on the
+                        # next request (DeepSeek requires this; harmless for
+                        # other vendors). Regular content still flows into
+                        # round_response unchanged.
+                        if data.get("thinking"):
+                            round_reasoning += data["delta"]
+                        else:
+                            round_response += data["delta"]
+                            full_response += data["delta"]
+                            yield f"data: {json.dumps(data)}\n\n"
+                        # Detect text-fence doc streaming. Normal agent prompts
+                        # use ```create_document; the doc LoRA streaming path
+                        # uses neutral ```document to avoid triggering learned
+                        # hidden native tool-call output.
+                        if (
+                            round_num > 1
+                            and not _doc_acc
+                            and not (tool_policy and tool_policy.blocks("create_document"))
+                        ):
+                            _fence_markers = ('```create_document\n',)
+                            _fence_marker = None
+                            for _mk in _fence_markers:
+                                _candidate = _mk[0] if isinstance(_mk, tuple) else _mk
+                                if _candidate in round_response[_doc_scan_from:]:
+                                    _fence_marker = _candidate
+                                    break
+                            # Open a new block if we're not currently inside one
+                            # and there's an unstreamed marker in the response.
+                            # The marker search starts at the byte after the
+                            # last block's closing fence so the SECOND
+                            # `create_document` block in the same round gets
+                            # detected (previously only the first one was
+                            # streamed and the rest were silently dropped).
+                            if not _doc_opened and _fence_marker:
+                                _fi = round_response.index(_fence_marker, _doc_scan_from)
+                                _fa = round_response[_fi + len(_fence_marker):]
+                                _fl = _fa.split('\n')
+                                if _fl and _fl[0].strip():
+                                    _doc_opened = True
+                                    _ft = _fl[0].strip()
+                                    _kl = {'python','py','javascript','js','typescript','ts','html','css','json','yaml','bash','sql','rust','go','java','c','cpp','markdown','text'}
+                                    _flang = _fl[1].strip() if len(_fl) > 1 and _fl[1].strip().lower() in _kl else ''
+                                    _doc_fence_offset = _fi + len(_fence_marker) + len(_fl[0]) + 1
+                                    if _flang:
+                                        _doc_fence_offset += len(_fl[1]) + 1
+                                    _doc_last_len = 0
+                                    yield f'data: {json.dumps({"type": "doc_stream_open", "title": _ft, "language": _flang})}\n\n'
+                            if _doc_opened:
+                                _rc = round_response[_doc_fence_offset:]
+                                _ci = _rc.find('\n```')
+                                if _ci >= 0:
+                                    _rc = _rc[:_ci]
+                                if len(_rc) > _doc_last_len:
+                                    _doc_last_len = len(_rc)
+                                    yield f'data: {json.dumps({"type": "doc_stream_delta", "content": _rc})}\n\n'
+                                # If the closing fence has arrived, finalise
+                                # this block and arm detection of the NEXT
+                                # one. The model can emit multiple
+                                # `create_document` blocks in a single round.
+                                if _ci >= 0:
+                                    _doc_opened = False
+                                    _doc_scan_from = _doc_fence_offset + _ci + len('\n```')
+                                    _doc_fence_offset = 0
+                                    _doc_last_len = 0
+                    elif data.get("error"):
+                        err_msg = data.get("error", "unknown")
+                        logger.error(f"Agent round {round_num}: stream error: {err_msg}")
+                        yield f'data: {json.dumps({"delta": chr(10) + chr(10) + "*[Stream error: " + str(err_msg) + "]*"})}\n\n'
+                except json.JSONDecodeError:
+                    if round_num == 1:
+                        yield chunk
+            elif chunk.startswith("event: "):
+                # Forward error events to frontend as visible text
+                yield chunk
+            # Intercept [DONE] — don't forward until all rounds finish
+
+        logger.info(
+            "[agent-timing] round_stream_done round=%s elapsed=%.3fs text_chars=%s tool_calls=%s first_event=%s first_token=%s",
+            round_num,
+            time.time() - _round_start,
+            len(round_response),
+            len(native_tool_calls),
+            _round_first_event_logged,
+            _round_first_token_logged,
+        )
+        _normalized_doc_round = round_response
+        tool_blocks, used_native, converted_calls = _resolve_tool_blocks(
+            _normalized_doc_round,
+            native_tool_calls,
+            round_num,
+            is_api_model=(_is_api_model and not guide_only),
+            # SAO: prefer native, but still accept fenced blocks if model falls back
+            # (or document LoRA path which is fence-only).
+            allow_fenced_for_api=_allow_fenced_fallback,
+        )
+
+
+                # Force-answer round: we told the model to STOP calling tools and
+        # answer. If it ignored that and emitted a (possibly DSML) tool
+        # call anyway, discard it — don't execute, don't re-loop. Keep
+        # only the prose; if there's none, emit a graceful fallback.
+        if _force_answer:
+            if tool_blocks:
+                logger.info(f"[agent] force-answer round {round_num}: discarding {len(tool_blocks)} ignored tool call(s)")
+            tool_blocks = []
+            if not _strip_think_blocks(strip_tool_blocks(round_response)).strip():
+                # The model burned its budget gathering data but never wrote a
+                # final answer (common with weaker models on multi-source
+                # briefings). Salvage it: one blunt non-streaming synthesis call
+                # over the full conversation (which already holds every tool
+                # result) before falling back to the canned apology.
+                _synth = ""
+                try:
+                    from src.llm_core import llm_call_async
+                    _synth_messages = list(messages) + [{
+                        "role": "user",
+                        "content": (
+                            "Using ONLY the information already gathered above, write "
+                            "the final answer for the user now. Do NOT call any tools, "
+                            "do NOT explain your reasoning — output the finished response "
+                            "directly. If some data couldn't be fetched, just work with "
+                            "what you have and note what's missing in one short line."
+                        ),
+                    }]
+                    _raw = await llm_call_async(
+                        url=endpoint_url, model=model, messages=_synth_messages,
+                        headers=headers, temperature=0.3, max_tokens=max_tokens, timeout=60,
+                    )
+                    _synth = _strip_think_blocks(strip_tool_blocks(_raw or "")).strip()
+                except Exception as _e:
+                    logger.warning(f"[agent] grace synthesis failed: {_e}")
+                if _synth:
+                    yield f'data: {json.dumps({"delta": _synth})}\n\n'
+                    full_response += _synth
+                else:
+                    _fb = ("I gathered some search results but couldn't pull a clean "
+                           "answer together. Want me to try a more specific question, "
+                           "or summarize what I did find?")
+                    yield f'data: {json.dumps({"delta": _fb})}\n\n'
+                    full_response += _fb
 
         # ── Fallback: auto-create document if model dumped large code in chat ──
         # If no create_document tool was used, check for big code blocks in text
@@ -565,13 +862,10 @@ async def stream_agent_loop(
         # on reload (#3222 follow-up).
         cleaned_round = strip_tool_blocks(round_response, skip_fenced=(_is_api_model and not used_native and not guide_only)).strip()
         round_texts.append(cleaned_round)
+
         if not tool_blocks:
             break  # no tools — done
-
         # ── Loop-breaker (duplicate call safety) ──────────────
-        # Simplified: detect repeated identical tool calls without new text.
-        # Hermes does not need this for strong models, but deepseek-v4-flash
-        # occasionally fires the same web_search with the same args in a loop.
         _sig = "|".join(sorted(f"{b.tool_type}:{(b.content or '').strip()[:120]}" for b in tool_blocks))
         _is_repeat = _sig in _recent_call_sigs
         _recent_call_sigs.append(_sig)
@@ -591,9 +885,9 @@ async def stream_agent_loop(
                     "from the information already gathered."
                 ),
             })
-            yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+            yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\
+\n'
             continue
-        
 
 
         # Pre-stream document content for fenced tool blocks (non-native path)
@@ -982,7 +1276,6 @@ async def stream_agent_loop(
                         _prefix = "\n\n" if _clean_current else ""
                         full_response = (_clean_current + _prefix + _notes_text).strip()
                         yield f'data: {json.dumps({"delta": _prefix + _notes_text})}\n\n'
-
 
             # This must be the final UI event for ask_user: the frontend appends
             # the card below the now-settled tool node and cancels any between-
