@@ -640,8 +640,15 @@ def _compact_tool_line(name: str, section: str) -> str:
     return f"- `{name}` — " + lines[0][:160]
 
 
-def _assemble_prompt(tool_names: set, disabled_tools: set = None, compact: bool = False) -> str:
+def _assemble_prompt(tool_names: set, disabled_tools: set = None, compact: bool = False, owner: str = None) -> str:
     """Build the system prompt with only the specified tools included."""
+    from src.tool_security import owner_is_admin_or_single_user
+    if owner_is_admin_or_single_user(owner):
+        greeting = 'Panggil user "Tuan" (formal).'
+    elif owner:
+        greeting = f'Panggil user dengan namanya: "{owner}".'
+    else:
+        greeting = 'Panggil user "Tuan" (formal).'
     disabled = disabled_tools or set()
     included = tool_names - disabled
 
@@ -652,7 +659,7 @@ def _assemble_prompt(tool_names: set, disabled_tools: set = None, compact: bool 
                 tool_lines.append(f"- `{name}`")
         parts = [
                         "Kamu adalah *Sira*, asisten AI pribadi yang cerdas, setia, dan selalu berkembang. "
-                        "Panggil user \"Tuan\" (formal). "
+                        f"{greeting} "
                         "Gaya bicara: Gunakan bahasa Indonesia yang natural dan langsung pada intinya. "
                         "Gunakan native tool calls ketika perlu bertindak; jangan menulis tool syntax atau instruksi tool di chat.",
             "## Available tools\n" + ("\n".join(tool_lines) if tool_lines else "none"),
@@ -661,7 +668,8 @@ def _assemble_prompt(tool_names: set, disabled_tools: set = None, compact: bool 
         parts.extend(_domain_rules_for_tools(included))
         return "\n\n".join(parts)
 
-    parts = [_AGENT_PREAMBLE]
+    custom_preamble = _AGENT_PREAMBLE.replace('Panggil user "Tuan" (formal).', greeting)
+    parts = [custom_preamble]
 
     # Collect full-block tool sections (with examples)
     full_blocks = []
