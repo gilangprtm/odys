@@ -81,6 +81,89 @@ _SENSITIVE_BASENAMES_CF: frozenset[str] = frozenset(b.casefold() for b in _SENSI
 _SENSITIVE_FILE_PATTERNS_CF: frozenset[str] = frozenset(p.casefold() for p in _SENSITIVE_FILE_PATTERNS)
 
 
+# ---------------------------------------------------------------------------
+# Mechanical Gate — yaml-defined policy boundary
+# ---------------------------------------------------------------------------
+# gate.yaml lives in the project root and defines paths the agent must never
+# write to, regardless of prompt or model. These are enforced as a HARD
+# block for write/edit/delete tools and a SOFT warning for bash/python.
+# ---------------------------------------------------------------------------
+_GATE_CONFIG_CACHE = None  # lazily loaded
+
+def _load_gate_config() -> dict:
+    global _GATE_CONFIG_CACHE
+    if _GATE_CONFIG_CACHE is not None:
+        return _GATE_CONFIG_CACHE
+    try:
+        import yaml as _yaml
+        _paths = [os.path.join(os.path.dirname(os.path.dirname(__file__)), "gate.yaml"),
+                  os.path.join(DATA_DIR, "gate.yaml"),
+                  os.path.join(os.getcwd(), "gate.yaml")]
+        for _p in _paths:
+            if os.path.exists(_p):
+                with open(_p, "r") as _fh:
+                    _cfg = _yaml.safe_load(_fh) or {}
+                _denylist = set()
+                for _entry in (_cfg.get("denylist", {}).get("paths") or []):
+                    _denylist.add(_entry)
+                    _denylist.add(_entry.rstrip("/"))
+                    # Also casefold the entry for case-insensitive matching
+                    _denylist.add(_entry.casefold())
+                    _denylist.add(_entry.rstrip("/").casefold())
+                if _denylist:
+                    global _SENSITIVE_BASENAMES, _SENSITIVE_BASENAMES_CF
+                    _SENSITIVE_BASENAMES = _SENSITIVE_BASENAMES | _denylist
+                    _SENSITIVE_BASENAMES_CF = frozenset(
+                        b.casefold() for b in _SENSITIVE_BASENAMES
+                    )
+                    logger.info("Mechanical Gate loaded from %s: %d denylist paths", _p, len(_denylist))
+                _GATE_CONFIG_CACHE = _cfg
+                return _cfg
+    except Exception as _e:
+        logger.warning("Mechanical Gate loading skipped: %s", _e)
+    _GATE_CONFIG_CACHE = {}
+    return _GATE_CONFIG_CACHE
+
+
+def _gate_allows_write(resolved_realpath: str, raw_path: str, tool_type: str) -> bool:
+    """Mechanical Gate: is this write/edit allowed by gate.yaml?
+
+    Returns True to allow, False to block (hard block for write/edit tool types,
+    soft block for bash/python — caller decides severity).
+    """
+    if not resolved_realpath:
+        return True
+    # _is_sensitive_path already blocks .env, .ssh etc — gate extends that.
+    resolved = os.path.realpath(resolved_realpath)
+    cfg = _load_gate_config()
+    denylist = cfg.get("denylist", {}).get("paths") or []
+    for _deny in denylist:
+        _deny_abs = _deny
+        if not os.path.isabs(_deny):
+            # Relative path from project root
+            _project = os.environ.get("ODYSSEUS_PROJECT_ROOT") or os.getcwd()
+            _deny_abs = os.path.realpath(os.path.join(_project, _deny))
+            if not _deny_abs.startswith(_project):
+                continue
+        if resolved.startswith(_deny_abs):
+            if tool_type in ("bash", "python"):
+                # Soft check for shell — warn but don't block
+                logger.warning(
+                    "Mechanical Gate soft-block: tool=%s attempted write to denylist path %s (matches %s)",
+                    tool_type, resolved, _deny,
+                )
+                return True  # allowed, but warned
+            else:
+                logger.info(
+                    "Mechanical Gate blocked: tool=%s path=%s (matches denylist %s)",
+                    tool_type, resolved, _deny,
+                )
+                return False  # hard block
+    return True
+
+# ---------------------------------------------------------------------------
+
+
 def _is_sensitive_path(resolved: str) -> bool:
     """Return True if *resolved* falls under a sensitive directory or
     matches a sensitive filename — regardless of what root it sits under.
@@ -179,6 +262,14 @@ def _resolve_tool_path(raw_path: str) -> str:
             f"path '{raw_path}' is inside a sensitive directory "
             f"(e.g. .ssh, .gnupg) or matches a sensitive filename"
         )
+    if not _gate_allows_write(resolved, raw_path, "write_file"):
+        raise ValueError(
+            f"path '{raw_path}' is blocked by gate.yaml denylist configuration"
+        )
+    if not _gate_allows_write(resolved, raw_path, "write_file"):
+        raise ValueError(
+            f"path '{raw_path}' is blocked by gate.yaml denylist configuration"
+        )
 
     for root in _tool_path_roots():
         if resolved == root:
@@ -213,6 +304,14 @@ def _resolve_tool_path_in_workspace(workspace: str, raw_path: str) -> str:
         raise ValueError(
             f"path '{raw_path}' is inside a sensitive directory "
             f"(e.g. .ssh, .gnupg) or matches a sensitive filename"
+        )
+    if not _gate_allows_write(resolved, raw_path, "write_file"):
+        raise ValueError(
+            f"path '{raw_path}' is blocked by gate.yaml denylist configuration"
+        )
+    if not _gate_allows_write(resolved, raw_path, "write_file"):
+        raise ValueError(
+            f"path '{raw_path}' is blocked by gate.yaml denylist configuration"
         )
     if resolved != base:
         # normcase so containment holds on case-insensitive filesystems

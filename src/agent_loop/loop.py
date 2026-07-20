@@ -463,6 +463,16 @@ async def stream_agent_loop(
     # tool, so we don't nudge on harmless transitional text like "let me
     # know what you think".    _awaiting_user = False  # set by ask_user → end the turn and wait for a choice
 
+    # ── Circuit breaker state (error normalization + stagnation detector) ──
+    # Track tool error signatures: normalize volatile parts (line numbers,
+    # ports, temp paths) to detect "same error, different details" patterns.
+    _error_signatures: collections.Counter = collections.Counter()
+    _consecutive_error_rounds = 0  # rounds where ALL tools failed with errors
+    _no_progress_rounds = 0        # rounds with zero useful output (no text, only errors)
+    _CB_MAX_SAME_ERROR = 3         # same normalized error N times → escalate
+    _CB_MAX_ERROR_ROUNDS = 3       # N consecutive rounds with only errors → escalate
+    _CB_MAX_NO_PROGRESS = 4        # N rounds with zero useful output → escalate
+
     # Document streaming state (persists across rounds)
     _doc_acc = ""          # accumulated tool-call JSON arguments
     _doc_opened = False    # whether doc_stream_open was sent
@@ -866,28 +876,85 @@ async def stream_agent_loop(
 
         if not tool_blocks:
             break  # no tools — done
-        # ── Loop-breaker (duplicate call safety) ──────────────
+        # ── Circuit breaker (error normalization + duplicate call safety) ──
         _sig = "|".join(sorted(f"{b.tool_type}:{(b.content or '').strip()[:120]}" for b in tool_blocks))
         _is_repeat = _sig in _recent_call_sigs
         _recent_call_sigs.append(_sig)
         _real_text = _strip_think_blocks(cleaned_round).strip()
+
+        # Analyze error patterns from this round's tool results
+        _round_has_error = False
+        _round_all_errors = bool(tool_blocks)
+        for _ev in tool_events:
+            if _ev.get("error") or _ev.get("exit_code", 0) != 0:
+                _round_has_error = True
+                # Normalize error signature: strip volatile parts
+                _err_text = (_ev.get("error") or _ev.get("output") or "")[:300]
+                _err_norm = re.sub(r"line \d+", "line N", _err_text)
+                _err_norm = re.sub(r"port \d+", "port N", _err_norm)
+                _err_norm = re.sub(r"pid \d+", "pid N", _err_norm)
+                _err_norm = re.sub(r"/tmp/[^ ]+", "/tmp/...", _err_norm)
+                _err_norm = re.sub(r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", "x.x.x.x", _err_norm)
+                _error_signatures[_err_norm[:120]] += 1
+            else:
+                _round_all_errors = False
+
+        if not _real_text and not _round_has_error:
+            _round_all_errors = False  # no tool errors = not "all errors"
+
+        # Track stagnation metrics
         if _is_repeat and not _real_text:
             _stuck_rounds += 1
         else:
             _stuck_rounds = 0
+
+        if _round_all_errors and _round_has_error:
+            _consecutive_error_rounds += 1
+        else:
+            _consecutive_error_rounds = 0
+
+        if not _real_text and (not tool_events or _round_all_errors):
+            _no_progress_rounds += 1
+        else:
+            _no_progress_rounds = 0
+
+        # ── Circuit breaker triggers ──
+        _cb_tripped = False
+        _cb_reason = ""
+
+        # 1. Duplicate call loop (same as before)
         if _stuck_rounds >= 3:
-            logger.warning(f"[agent] loop-breaker tripped on round {round_num}; repeated same tool call without new text")
+            _cb_tripped = True
+            _cb_reason = f"repeated same tool call {_stuck_rounds}x without new text"
+
+        # 2. Same error flooding
+        elif _error_signatures:
+            _most_common_err, _count = _error_signatures.most_common(1)[0]
+            if _count >= _CB_MAX_SAME_ERROR:
+                _cb_tripped = True
+                _cb_reason = f"same error occurred {_count}x: {_most_common_err[:100]}"
+
+        # 3. Consecutive all-error rounds
+        elif _consecutive_error_rounds >= _CB_MAX_ERROR_ROUNDS:
+            _cb_tripped = True
+            _cb_reason = f"{_consecutive_error_rounds} consecutive rounds with only errors"
+
+        # 4. No progress at all
+        elif _no_progress_rounds >= _CB_MAX_NO_PROGRESS:
+            _cb_tripped = True
+            _cb_reason = f"{_no_progress_rounds} rounds with zero useful output"
+
+        if _cb_tripped:
+            logger.warning(f"[agent] circuit breaker tripped on round {round_num}: {_cb_reason}")
             _force_answer = True
-            messages.append({
-                "role": "system",
-                "content": (
-                    "You are repeating the same tool call without new progress. "
-                    "STOP calling tools and write your best final answer NOW "
-                    "from the information already gathered."
-                ),
-            })
-            yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\
-\n'
+            _escalation_msg = (
+                f"The agent loop is stuck ({_cb_reason}). "
+                "STOP calling tools immediately. Write your best final answer NOW "
+                "from the information already gathered. If you have nothing useful, "
+                "tell the user exactly what went wrong and what they should try next."
+            )
+            messages.append({"role": "system", "content": _escalation_msg})
+            yield f'data: {json.dumps({"type": "circuit_breaker", "round": round_num, "reason": _cb_reason})}\n\n'
             continue
 
 

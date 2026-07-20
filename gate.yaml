@@ -1,0 +1,31 @@
+# ── Mechanical Gate Policy ──
+# Loaded at runtime by src/tool_execution.py:_load_gate_config
+# This file is the machine-readable twin of docs/safety.md.
+# Paths listed here are HARD-blocked for write_file/edit_file/delete
+# and SOFT-warned for bash/python.
+
+denylist:
+  # Sensitive system files that must never be created/edited by agent tools
+  paths:
+    - ".env"
+    - ".env.local"
+    - ".env.production"
+    - "secrets.json"
+    - "service-account.json"
+    - ".git/"
+    - ".gitconfig"
+    - ".ssh/"
+    - ".gnupg/"
+    - ".netrc"
+    - "gate.yaml"              # agent must never edit its own gate
+    - "node_modules/"           # too large, not agent's business
+    - ".venv/"
+    - "__pycache__/"
+    - "*.db"
+    - "*.sqlite"
+    - "*.sqlite3"
+    - "*.key"
+    - "*.pem"
+    - "*.cert"
+    - "data/sessions/"
+    - "data/db.sqlite3"
