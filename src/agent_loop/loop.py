@@ -428,7 +428,7 @@ async def stream_agent_loop(
     round_texts = []   # Cleaned text per round for history reload
     # Completion-verifier state (mechanism 3a). _effectful_used flips on when
     # a tool that produces a checkable artifact runs; the verifier only fires
-    # on such turns and at most _VERIFIER_MAX_ROUNDS times.
+    # on such turns.
     real_input_tokens = 0   # Accumulated real usage from API
     real_output_tokens = 0
     last_round_input_tokens = 0  # Last round's input tokens (for context % peak)
@@ -1349,8 +1349,6 @@ async def stream_agent_loop(
                 # message removes it as answered.
                 tool_event["ask_user"] = _pending_ask_user_event
             tool_events.append(tool_event)
-            if block.tool_type in _VERIFIER_EFFECTFUL_TOOLS:
-                _effectful_used = True
 
             formatted = format_tool_result(desc, result)
             tool_results.append(formatted)
