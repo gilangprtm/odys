@@ -335,37 +335,7 @@ async def stream_agent_loop(
         suppress_skills=_low_signal_turn,
         active_email=active_email,
     )
-    if _ody_doc_finetune_mode and not plan_mode and not approved_plan and not guide_only:
-        messages = _minimal_odysseus_doc_messages(
-            messages,
-            _prompt_active_document,
-            stream_create=_ody_doc_stream_create_mode,
-        )
-        mcp_schemas = []
-        logger.info(
-            "[agent-intent] odysseus doc minimal prompt active active_doc=%s stream_create=%s messages=%s",
-            bool(_prompt_active_document),
-            _ody_doc_stream_create_mode,
-            len(messages),
-        )
-    elif _ody_notes_finetune_mode and not plan_mode and not approved_plan and not guide_only:
-        messages = _minimal_odysseus_notes_messages(messages)
-        mcp_schemas = []
-        logger.info(
-            "[agent-intent] odysseus notes minimal prompt active messages=%s",
-            len(messages),
-        )
-    elif _ody_qwen_finetune_model and not plan_mode and not approved_plan and not guide_only:
-        messages = _minimal_odysseus_general_messages(
-            messages,
-            include_memory=True,
-        )
-        mcp_schemas = []
-        logger.info(
-            "[agent-intent] odysseus general minimal prompt active include_memory=%s messages=%s",
-            _ody_memory_identity_turn,
-            len(messages),
-        )
+
     if plan_mode and not guide_only:
         # Steer the model to investigate-then-propose. Hard tool gating handles
         # every write path except shell; this directive is what keeps the
@@ -1011,7 +981,7 @@ async def stream_agent_loop(
                         _prefix = "\n\n" if _clean_current else ""
                         full_response = (_clean_current + _prefix + _notes_text).strip()
                         yield f'data: {json.dumps({"delta": _prefix + _notes_text})}\n\n'
-                    _ody_notes_tool_completed = True
+
 
             # This must be the final UI event for ask_user: the frontend appends
             # the card below the now-settled tool node and cancels any between-
@@ -1091,18 +1061,7 @@ async def stream_agent_loop(
             formatted = format_tool_result(desc, result)
             tool_results.append(formatted)
             tool_result_texts.append(formatted)
-            if (
-                _ody_doc_stream_create_mode
-                and block.tool_type == "create_document"
-                and result.get("action") == "create"
-            ):
-                _doc_stream_create_completed = True
-            if (
-                _ody_doc_finetune_mode
-                and block.tool_type in ("create_document", "update_document", "edit_document", "suggest_document")
-                and not result.get("error")
-            ):
-                _ody_doc_tool_completed = True
+
 
         # If budget was hit, stop the loop
         if budget_hit:
@@ -1179,22 +1138,7 @@ async def stream_agent_loop(
     # prose. Local finetunes may emit those before the parser catches and
     # executes them; saved history should contain only the user-facing answer.
     full_response = strip_tool_blocks(full_response).strip()
-    if _ody_notes_finetune_mode and tool_events:
-        for _ev in reversed(tool_events):
-            if _ev.get("tool") != "manage_notes":
-                continue
-            _notes_action = ""
-            try:
-                _cmd_args = json.loads(_ev.get("command") or "{}")
-                if isinstance(_cmd_args, dict):
-                    _notes_action = str(_cmd_args.get("action") or "").lower()
-            except Exception:
-                _notes_action = ""
-            if _notes_action in {"list", "search", "find", "view", "lis"}:
-                _notes_summary = _note_list_summary_from_tool_output(_ev.get("output") or "")
-                if _notes_summary:
-                    full_response = _notes_summary
-                break
+
 
     # --- Final metrics ---
     total_duration = time.time() - total_start
