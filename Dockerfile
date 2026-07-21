@@ -83,7 +83,7 @@ RUN pip install --no-cache-dir python-magic==0.4.27
 # wheels instead of rebuilding the sdists that fail on Python 3.14.
 # COPY --from=realesrgan-wheels /wheels/ /tmp/odysseus-wheels/
 # RUN pip install --no-cache-dir --no-deps /tmp/odysseus-wheels/*.whl \
-    && rm -rf /tmp/odysseus-wheels
+#     && rm -rf /tmp/odysseus-wheels
 
 # Copy app code
 COPY . .
