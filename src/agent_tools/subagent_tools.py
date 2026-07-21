@@ -1,108 +1,132 @@
 """subagent_tools.py — agent tool for spawning isolated sub-agents.
 
-Sub-agents run a full stream_agent_loop with their own messages, terminal
-session, and toolset. The main agent continues while the sub-agent works;
-results are delivered back as tool output.
+Supports two modes (ECC-compatible):
+1. Single task: goal + context + optional toolsets
+2. Batch (parallel): tasks array (up to 3) run concurrently
+
+Each sub-agent gets its own conversation, terminal session, and scoped toolset.
+Results are collected and merged.
 """
 
 import asyncio
 import json
 import logging
 import uuid
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+# Tool scopes — maps readable names to sets of tool names to disable.
+TOOL_SCOPES = {
+    "read": {"write_file", "edit_file", "ask_user", "manage_skills",
+             "manage_tasks", "manage_session", "manage_endpoints",
+             "manage_mcp", "manage_webhooks", "manage_tokens",
+             "chat_with_model", "ask_teacher", "generate_image",
+             "ui_control", "update_plan", "create_session",
+             "list_sessions", "send_to_session", "manage_documents"},
+    "read-terminal": {"ask_user", "manage_skills", "manage_tasks",
+                      "manage_session", "manage_endpoints",
+                      "manage_mcp", "manage_webhooks", "manage_tokens",
+                      "chat_with_model", "ask_teacher", "generate_image",
+                      "ui_control", "update_plan", "create_session",
+                      "list_sessions", "send_to_session", "manage_documents"},
+    "web-only": {"write_file", "edit_file", "bash", "python",
+                 "ask_user", "manage_skills", "manage_tasks",
+                 "manage_session", "manage_session", "manage_endpoints",
+                 "chat_with_model", "ask_teacher", "manage_documents"},
+    "full": set(),  # all tools available
+}
 
-async def delegate_task(
-    content: str,
+
+def _resolve_toolsets(toolsets: Optional[List[str]]) -> set:
+    """Resolve tool scope names to a set of disabled_tools."""
+    combined = set()
+    if not toolsets:
+        # default: read-only (safe)
+        return TOOL_SCOPES["read"]
+    for ts in toolsets:
+        ts = ts.strip().lower()
+        if ts in TOOL_SCOPES:
+            combined.update(TOOL_SCOPES[ts])
+    return combined
+
+
+async def _run_single_subagent(
+    goal: str,
+    context: str = "",
+    toolsets: Optional[List[str]] = None,
     session_id: Optional[str] = None,
     owner: Optional[str] = None,
-) -> Dict:
-    """Spawn an isolated sub-agent to work on a task.
+    temperature: float = 0.3,
+    max_rounds: int = 10,
+    max_tokens: int = 4096,
+    role: str = "leaf",
+) -> Dict[str, Any]:
+    """Run a single sub-agent task and return its result dict."""
+    from src.agent_loop.loop import stream_agent_loop
+    from src.tool_schemas import FUNCTION_TOOL_SCHEMAS
+    from src.database import SessionLocal, ModelEndpoint
+    from src.endpoint_resolver import resolve_endpoint_runtime, build_headers
+    from src.auth_helpers import owner_filter
 
-    Content:
-      Line 1: goal (brief description)
-      Line 2+: context (background, constraints, file paths)
+    db = SessionLocal()
+    try:
+        query = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
+        if owner:
+            query = owner_filter(query, ModelEndpoint, owner)
+        endpoint = query.order_by(ModelEndpoint.position).first()
+        if not endpoint:
+            return {"goal": goal[:80], "error": "No enabled endpoint for sub-agent"}
+        base_url, api_key = resolve_endpoint_runtime(endpoint, owner=owner)
+        model_name = endpoint.default_model or "auto"
+        headers = build_headers(api_key, base_url)
+    finally:
+        db.close()
 
-    The sub-agent runs with a clean conversation, isolated terminal, and
-    a restricted toolset (read-only + web search). Returns the sub-agent's
-    final response or an error message.
-    """
-    lines = content.strip().split("\n", 1)
-    goal = lines[0].strip()[:200] if lines else ""
-    context = lines[1].strip() if len(lines) > 1 else ""
+    # System prompt
+    system_tools = {s["function"]["name"] for s in FUNCTION_TOOL_SCHEMAS}
+    from src.agent_loop.prompts import _assemble_prompt
+    system_prompt = _assemble_prompt(tool_names=system_tools, compact=True, owner=owner)
 
-    if not goal:
-        return {"error": "Delegate needs a goal on line 1"}
+    if role == "orchestrator":
+        system_prompt += "\n\nYou ARE an orchestrator — you can spawn your own sub-agents."
+
+    sub_messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"## Task\n{goal}\n\n## Context\n{context}\n\nWork autonomously and report your findings."},
+    ]
+
+    disabled_tools = _resolve_toolsets(toolsets)
+    # leaf agents cannot delegate further
+    if role != "orchestrator":
+        disabled_tools.add("delegate_task")
+
+    sub_id = session_id + "_sub_" + uuid.uuid4().hex[:6] if session_id else None
+
+    sub_output: List[str] = []
+    sub_tool_events: List[Dict] = []
 
     try:
-        from src.agent_loop.loop import stream_agent_loop
-        from src.agent_loop.helpers import _extract_last_user_message
-        from src.tool_schemas import FUNCTION_TOOL_SCHEMAS
-        from src.model_context import estimate_tokens
-        from src.database import SessionLocal, ModelEndpoint
-        from src.endpoint_resolver import resolve_endpoint_runtime, build_headers
-        from src.auth_helpers import owner_filter
-
-        # Determine the best available endpoint/model
-        db = SessionLocal()
-        try:
-            query = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
-            if owner:
-                query = owner_filter(query, ModelEndpoint, owner)
-            endpoint = query.order_by(ModelEndpoint.position).first()
-            if not endpoint:
-                return {"error": "No enabled endpoint for sub-agent"}
-            base_url, api_key = resolve_endpoint_runtime(endpoint, owner=owner)
-            model_name = endpoint.default_model or "auto"
-            headers = build_headers(api_key, base_url)
-        finally:
-            db.close()
-
-        # Build messages for the sub-agent
-        system_tools = {s["function"]["name"] for s in FUNCTION_TOOL_SCHEMAS}
-        from src.agent_loop.prompts import _assemble_prompt
-        system_prompt = _assemble_prompt(
-            tool_names=system_tools,
-            disabled_tools=set(),
-            compact=True,
-            owner=owner,
-        )
-
-        sub_messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"## Task\n{goal}\n\n## Context\n{context}\n\nWork autonomously and report your findings."},
-        ]
-
-        # Run the sub-agent in a new event context
-        sub_output: List[str] = []
-        sub_tool_events: List[Dict] = []
-
         async for event in stream_agent_loop(
             endpoint_url=base_url,
             model=model_name,
             messages=sub_messages,
             headers=headers,
-            temperature=0.3,
-            max_tokens=4096,
-            max_rounds=10,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            max_rounds=max_rounds,
             owner=owner,
-            session_id=session_id + "_sub" if session_id else None,
-            disabled_tools={"ask_user", "search_chats", "manage_memory", "manage_tasks", "chat_with_model",
-                           "ask_teacher", "create_session", "list_sessions", "send_to_session", "manage_session"},
+            session_id=sub_id,
+            disabled_tools=disabled_tools,
             workload="background",
         ):
-            # Parse SSE events
             if event.startswith("data: "):
                 payload = event[6:]
                 if payload == "[DONE]":
                     break
                 try:
                     data = json.loads(payload)
-                    if data.get("type") == "metrics":
-                        pass  # capture metrics later
-                    elif "delta" in data:
+                    if "delta" in data:
                         sub_output.append(data["delta"])
                     elif data.get("type") == "tool_event":
                         sub_tool_events.append(data)
@@ -112,9 +136,87 @@ async def delegate_task(
         final = "".join(sub_output)
         if not final.strip():
             final = f"Task completed with {len(sub_tool_events)} tool call(s)."
-
-        return {"sub_agent": True, "goal": goal, "response": final.strip()[:8000]}
-
+        return {
+            "goal": goal[:200],
+            "response": final.strip()[:8000],
+            "tool_calls": len(sub_tool_events),
+        }
     except Exception as e:
-        logger.error(f"delegate_task failed: {e}")
-        return {"error": f"Sub-agent failed: {e}", "goal": goal}
+        logger.error("Sub-agent '%s' failed: %s", goal[:60], e)
+        return {"goal": goal[:200], "error": str(e)[:500]}
+
+
+async def delegate_task(
+    content: str,
+    session_id: Optional[str] = None,
+    owner: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Spawn one or more isolated sub-agents.
+
+    Content (single task mode):
+      Line 1: goal
+      Line 2+: context
+
+    Content (batch mode):
+      Full JSON object: {"tasks": [...], "toolsets": [...]}
+    """
+    if not content or not content.strip():
+        return {"error": "delegate_task needs a goal or tasks"}
+
+    stripped = content.strip()
+
+    # Detect batch mode (starts with {)
+    if stripped.startswith("{"):
+        try:
+            args = json.loads(stripped)
+        except json.JSONDecodeError:
+            return {"error": "Batch mode requires valid JSON: {\"tasks\": [{\"goal\": \"...\"}]}"}
+
+        tasks_spec = args.get("tasks", [])
+        toolsets = args.get("toolsets") or []
+        if not tasks_spec or not isinstance(tasks_spec, list):
+            return {"error": "Batch mode expects tasks array with at least one item"}
+
+        if len(tasks_spec) > 3:
+            tasks_spec = tasks_spec[:3]
+
+        results = await asyncio.gather(*[
+            _run_single_subagent(
+                goal=t.get("goal", "Untitled"),
+                context=t.get("context", ""),
+                toolsets=toolsets,
+                session_id=session_id,
+                owner=owner,
+                role=t.get("role", "leaf"),
+            )
+            for t in tasks_spec
+        ])
+
+        return {
+            "sub_agent": True,
+            "batch": True,
+            "count": len(results),
+            "results": results,
+        }
+
+    # Single task mode
+    lines = stripped.split("\n", 1)
+    goal = lines[0].strip()[:200] if lines else ""
+    context = lines[1].strip() if len(lines) > 1 else ""
+
+    if not goal:
+        return {"error": "Delegate needs a goal on line 1"}
+
+    result = await _run_single_subagent(
+        goal=goal,
+        context=context,
+        session_id=session_id,
+        owner=owner,
+    )
+
+    return {
+        "sub_agent": True,
+        "goal": result.get("goal", goal),
+        "response": result.get("response", ""),
+        "error": result.get("error"),
+    }

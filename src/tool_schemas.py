@@ -1234,14 +1234,27 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "delegate_task",
-            "description": "Spawn an isolated sub-agent to work on a background task (research, code analysis, multi-file inspection). The sub-agent runs autonomously with its own loop and tools. Returns its final answer. Use for any task that would benefit from parallel or independent reasoning.",
+            "description": "Spawn one or more subagents to work on tasks in isolated contexts. Each subagent gets its own conversation, terminal session, and toolset. Only the final summary is returned. Can be run in single task mode (provide goal/context) or batch mode (provide tasks list of objects).",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "goal": {"type": "string", "description": "Brief goal description (one line)"},
-                    "context": {"type": "string", "description": "Background context, constraints, file paths"}
-                },
-                "required": ["goal", "context"]
+                    "goal": {"type": "string", "description": "Goal for single task mode"},
+                    "context": {"type": "string", "description": "Context/details for single task mode"},
+                    "toolsets": {"type": "array", "items": {"type": "string"}, "description": "Optional list of allowed tool types (e.g. ['read', 'write', 'web', 'terminal'])"},
+                    "tasks": {
+                        "type": "array",
+                        "description": "Batch mode: run up to 3 tasks in parallel. Each task inherits toolsets and limits.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "goal": {"type": "string", "description": "Goal for this subagent"},
+                                "context": {"type": "string", "description": "Background context for this subagent"},
+                                "role": {"type": "string", "enum": ["leaf", "orchestrator"], "description": "Subagent role. Leaf cannot delegate further."}
+                            },
+                            "required": ["goal"]
+                        }
+                    }
+                }
             }
         }
     },
@@ -1592,7 +1605,16 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
         # remain visible in the debug panel.
         content = json.dumps(args, ensure_ascii=False)
     elif tool_type == "delegate_task":
-        content = args.get("goal", "") + "\n" + args.get("context", "")
+        if args.get("tasks"):
+            # Batch mode: forward the full JSON structure
+            content = json.dumps({"tasks": args["tasks"], "toolsets": args.get("toolsets", [])})
+        else:
+            # Single task mode
+            toolsets = args.get("toolsets")
+            if toolsets:
+                content = json.dumps({"goal": args.get("goal", ""), "context": args.get("context", ""), "toolsets": toolsets})
+            else:
+                content = args.get("goal", "") + "\n" + args.get("context", "")
     elif tool_type.startswith("skill_"):
         content = args.get("instruction", "")
     else:
