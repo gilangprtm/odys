@@ -61,6 +61,7 @@ async def _run_single_subagent(
     max_rounds: int = 10,
     max_tokens: int = 4096,
     role: str = "leaf",
+    agent_type: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run a single sub-agent task and return its result dict."""
     from src.agent_loop.loop import stream_agent_loop
@@ -68,6 +69,7 @@ async def _run_single_subagent(
     from src.database import SessionLocal, ModelEndpoint
     from src.endpoint_resolver import resolve_endpoint_runtime, build_headers
     from src.auth_helpers import owner_filter
+    from src.agent_tools.agent_definitions import get_agent_registry
 
     db = SessionLocal()
     try:
@@ -90,6 +92,18 @@ async def _run_single_subagent(
 
     if role == "orchestrator":
         system_prompt += "\n\nYou ARE an orchestrator — you can spawn your own sub-agents."
+
+    # Inject agent instructions from AgentRegistry (ECC ~/agents/<type>.md)
+    if agent_type:
+        try:
+            _agent_reg = get_agent_registry()
+            if not _agent_reg.loaded:
+                _agent_reg.reload()
+            _agent_def = _agent_reg.get_agent(agent_type)
+            if _agent_def:
+                system_prompt += f"\n\n## You are: {_agent_def.name}\n{_agent_def.instructions}"
+        except Exception as _agent_e:
+            logger.debug("Agent type '%s' not loaded: %s", agent_type, _agent_e)
 
     sub_messages = [
         {"role": "system", "content": system_prompt},
@@ -188,6 +202,7 @@ async def delegate_task(
                 session_id=session_id,
                 owner=owner,
                 role=t.get("role", "leaf"),
+                agent_type=t.get("agent") or t.get("type"),
             )
             for t in tasks_spec
         ])
@@ -207,11 +222,23 @@ async def delegate_task(
     if not goal:
         return {"error": "Delegate needs a goal on line 1"}
 
+    # Also allow JSON single task with agent field
+    agent_type = None
+    if stripped.startswith("{"):
+        try:
+            single_args = json.loads(stripped)
+            goal = single_args.get("goal", goal)
+            context = single_args.get("context", context)
+            agent_type = single_args.get("agent") or single_args.get("type")
+        except json.JSONDecodeError:
+            pass
+
     result = await _run_single_subagent(
         goal=goal,
         context=context,
         session_id=session_id,
         owner=owner,
+        agent_type=agent_type,
     )
 
     return {
