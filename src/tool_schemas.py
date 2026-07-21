@@ -1289,21 +1289,75 @@ def _repair_document_function_args(tool_type: str, arguments: str) -> Optional[d
     return None
 
 
+def _repair_json_arguments(arguments: str) -> Optional[dict]:
+    """Try to repair common JSON syntax errors in model-generated tool call arguments."""
+    text = arguments.strip() if isinstance(arguments, str) else str(arguments)
+    
+    # Fix 1: Replace > with : in key:value pairs (common deepseek quirk)
+    # {"command">"ls"} -> {"command":"ls"}
+    text = re.sub(r'"\s*>\s*"', '":"', text)
+    
+    # Fix 2: Replace -> with : in key:value pairs
+    text = re.sub(r'"\s*->\s*"', '":"', text)
+    
+    # Fix 3: Unquoted numbers/booleans
+    # {"command": ls -la} -> no fix possible, but try anyway
+    
+    # Fix 4: Missing closing braces
+    open_braces = text.count('{')
+    close_braces = text.count('}')
+    if open_braces > close_braces:
+        text += '}' * (open_braces - close_braces)
+    
+    # Fix 5: Missing closing brackets
+    open_brack = text.count('[')
+    close_brack = text.count(']')
+    if open_brack > close_brack:
+        text += ']' * (open_brack - close_brack)
+    
+    try:
+        result = json.loads(text)
+        if isinstance(result, dict):
+            return result
+        if isinstance(result, str):
+            return {"command": result}
+        if isinstance(result, list):
+            return {"items": result}
+        return None
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
 def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock]:
     """Convert a native function call into a ToolBlock for the existing execution pipeline."""
     tool_type = _TOOL_NAME_MAP.get(name, name)
+    args = None
+    
+    # Attempt 1: direct JSON parse
     try:
         if not arguments or (isinstance(arguments, str) and not arguments.strip()):
             args = {}
         else:
             args = json.loads(arguments) if isinstance(arguments, str) else arguments
     except (json.JSONDecodeError, TypeError):
+        pass
+    
+    # Attempt 2: document function repair
+    if args is None:
         args = _repair_document_function_args(tool_type, arguments)
         if args is not None:
             logger.warning(f"Repaired malformed document function call arguments for {name}")
-        else:
-            logger.error(f"Failed to parse function call arguments for {name}: {arguments}")
-            return None
+    
+    # Attempt 3: generic JSON repair (catches >, ->, missing braces, etc.)
+    if args is None:
+        args = _repair_json_arguments(arguments)
+        if args is not None:
+            logger.info(f"[json-repair] Auto-repaired malformed JSON for {name}: {arguments[:80]}...")
+    
+    # If all repairs failed, log and return None
+    if args is None:
+        logger.error(f"Failed to parse function call arguments for {name}: {arguments[:200]}")
+        return None
 
     # Some models emit valid JSON that isn't an object (e.g. a bare array
     # ["ls -la"], string, or number) as function arguments. Most local tools keep

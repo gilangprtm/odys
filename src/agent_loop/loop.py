@@ -500,6 +500,8 @@ async def stream_agent_loop(
     # signatures + consecutive no-text tool rounds to bail early.
     _recent_call_sigs = collections.deque(maxlen=6)
     _stuck_rounds = 0
+    # Retry holder for native tool call JSON parse failures
+    _native_retries_holder = type('_nr', (), {'_n': 0})()
     # Frequency of each exact call signature (tool + args), for the runaway
     # backstop. Counting identical repeats — not distinct same-tool calls —
     # lets a legit batch (e.g. 18 calendar events at once) through.
@@ -841,8 +843,35 @@ async def stream_agent_loop(
             allow_fenced_for_api=_allow_fenced_fallback,
         )
 
+        # --- NATIVE TOOL CALL RETRY ---
+        # If model emitted native tool calls but ALL failed conversion (even after auto-repair),
+        # inject correction and retry. Track retry count to prevent infinite loops.
+        if native_tool_calls and not tool_blocks and not _force_answer and round_num < max_rounds:
+            _native_retries = getattr(_native_retries_holder, "_n", 0) + 1
+            object.__setattr__(_native_retries_holder, "_n", _native_retries)
+            if _native_retries <= 2:
+                failed_count = len(native_tool_calls)
+                logger.warning(
+                    f"[agent] round {round_num}: all {failed_count} native tool call(s) failed to parse — "
+                    f"retry {_native_retries}/2"
+                )
+                # Save the assistant's (malformed) response so model sees what it tried
+                if round_response.strip():
+                    messages.append({"role": "assistant", "content": round_response})
+                # Clear round_response so we don't output empty text
+                round_response = ""
+                # Inject correction
+                correction = (
+                    "Your previous response contained tool calls, but they could not be parsed due to "
+                    "malformed JSON arguments. Focus ONLY on fixing the JSON format and retry. "
+                    "Example: bash -> {\"command\": \"ls -la\"}"
+                )
+                messages.append({"role": "user", "content": correction})
+                continue  # re-enter loop (costs 1 round budget)
+            else:
+                logger.warning(f"[agent] round {round_num}: tool call parse retry exhausted (3/3), proceeding without tools")
 
-                # Force-answer round: we told the model to STOP calling tools and
+        # Force-answer round: we told the model to STOP calling tools and
         # answer. If it ignored that and emitted a (possibly DSML) tool
         # call anyway, discard it — don't execute, don't re-loop. Keep
         # only the prose; if there's none, emit a graceful fallback.
