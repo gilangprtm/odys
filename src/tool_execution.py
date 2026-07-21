@@ -843,6 +843,19 @@ async def _execute_tool_block_impl(
         logger.warning("Public tool policy blocked owner=%r tool=%s", owner, tool)
         return desc, result
 
+    # ── PreToolUse Hooks (Sync block/exec) ──
+    try:
+        from src.hooks.registry import get_registry as _get_hook_reg
+        _hr = _get_hook_reg()
+        if _hr.loaded:
+            _hook_res = _hr.run_pre_tool(tool, content)
+            if _hook_res and _hook_res.blocked:
+                desc = f"{tool}: BLOCKED (Hook: {_hook_res.hook_name})"
+                result = {"error": f"Execution blocked by PreToolUse hook: {_hook_res.block_message}", "exit_code": 1}
+                return desc, result
+    except Exception as e:
+        logger.debug("PreToolUse hook check failed: %s", e)
+
 
     # Background execution: a `bash` block whose first line is the `#!bg`
     # marker runs DETACHED — returns a job id immediately so the chat stream

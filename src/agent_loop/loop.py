@@ -277,6 +277,17 @@ async def stream_agent_loop(
     except Exception as e:
         logger.debug("[rules] Init skipped: %s", e)
 
+    # Initialize hooks registry once per session
+    try:
+        from src.hooks.registry import get_registry as _get_hooks
+        _hr = _get_hooks()
+        if not _hr.loaded:
+            _n_hooks = _hr.reload()
+            if _n_hooks > 0:
+                logger.info("[hooks] Loaded %s hook(s)", _n_hooks)
+    except Exception as e:
+        logger.debug("[hooks] Init skipped: %s", e)
+
     # Tool Selection (Hermes style)
     _relevant_tools = relevant_tools
     _t1 = time.time()
@@ -1273,6 +1284,18 @@ async def stream_agent_loop(
                             f'data: {json.dumps({"type": "tool_progress", "tool": block.tool_type, "round": round_num, **evt})}\n\n'
                         )
                     desc, result = await _tool_task
+
+                    # ── PostToolUse Hooks (Async fire-and-forget) ──
+                    try:
+                        from src.hooks.registry import get_registry as _get_hook_reg
+                        _hr = _get_hook_reg()
+                        if _hr.loaded:
+                            _tool_name = getattr(block, 'tool_type', '')
+                            _tool_args = getattr(block, 'content', '')
+                            _ = _hr.run_post_tool(_tool_name, _tool_args, desc, result)
+                    except Exception as _hook_e:
+                        logger.debug("PostToolUse hook failed: %s", _hook_e)
+
                 finally:
                     # If the SSE client disconnects (or this generator is
                     # otherwise closed) while we're awaiting a progress event
