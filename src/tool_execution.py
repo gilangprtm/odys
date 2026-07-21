@@ -662,6 +662,39 @@ async def _document_tool_dispatch(
     return None
 
 
+import re as _re
+
+def _maybe_cleanup_old_repos():
+    """Auto-delete cached repos if disk >90% or repos older than 60 minutes."""
+    import shutil, glob, os
+    # Check disk usage
+    try:
+        stat = shutil.disk_usage("/")
+        if stat.free / stat.total > 0.10:
+            # Disk has space, only cleanup old (>60min)
+            age_threshold = 3600  # 1 hour in seconds
+        else:
+            # Disk critical, cleanup all cached repos immediately
+            age_threshold = 0
+    except Exception:
+        age_threshold = 3600
+    
+    now = os.path.getmtime
+    for repo_dir in glob.glob("/tmp/odys_repo_*"):
+        if not os.path.isdir(os.path.join(repo_dir, ".git")):
+            continue
+        try:
+            if os.path.getmtime(repo_dir) < now(repo_dir) - age_threshold:
+                shutil.rmtree(repo_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+# Run cleanup on import (once per container restart)
+try:
+    _maybe_cleanup_old_repos()
+except Exception:
+    pass
+
 # ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
@@ -850,12 +883,54 @@ async def _execute_tool_block_impl(
         first_line = content.split(chr(10))[0][:80]
         desc = f"{tool}: {first_line}"
         
-        # Git clone guard: prevent massive repos blowing up disk
+        # Git clone guard with auto-cache: convert to shallow clone in /tmp
         if tool == "bash" and "git clone" in content.lower():
-            result = {
-                "error": "Execution blocked: 'git clone' is restricted due to limited disk space on this VPS. Use 'web_fetch' to read individual files or ask the user for permission first.",
-                "exit_code": 1
-            }
+            import hashlib
+            import re
+            # Extract URL from git clone command
+            _url_match = re.search(r'git\s+clone\s+(?:--[^\s]+\s+)*([^\s]+)', content, re.IGNORECASE)
+            if _url_match:
+                _repo_url = _url_match.group(1)
+                # Generate cache dir from URL hash
+                _url_hash = hashlib.sha256(_repo_url.encode()).hexdigest()[:12]
+                _cache_dir = f"/tmp/odys_repo_{_url_hash}"
+                
+                # If already cached, just tell model to use it
+                import os
+                if os.path.isdir(os.path.join(_cache_dir, ".git")):
+                    result = {
+                        "output": f"Repo already cached at {_cache_dir}. Use read_file/grep/ls to inspect:",
+                        "exit_code": 0,
+                        "cached_repo": _cache_dir
+                    }
+                else:
+                    # Auto-convert to shallow clone with single branch
+                    _shallow_cmd = f"git clone --depth 1 --single-branch {_repo_url} {_cache_dir}"
+                    from src.agent_tools import TOOL_HANDLERS
+                    _ctx = {
+                        "progress_cb": progress_cb,
+                        "subproc_env": {"TERM": "xterm-256color", "COLUMNS": "120", "LINES": "40", "HOME": _AGENT_WORKDIR},
+                        "session_id": session_id,
+                        "owner": owner,
+                    }
+                    _clone_result = await TOOL_HANDLERS["bash"](_shallow_cmd, _ctx)
+                    if _clone_result.get("exit_code", 1) == 0:
+                        result = {
+                            "output": f"Cloned repo to {_cache_dir} (shallow). Use read_file/grep/ls to inspect.",
+                            "exit_code": 0,
+                            "cached_repo": _cache_dir
+                        }
+                    else:
+                        result = {
+                            "error": f"Failed to clone {_repo_url}: {_clone_result.get('output', '')}",
+                            "exit_code": 1
+                        }
+            else:
+                # Could not parse URL, just block
+                result = {
+                    "error": "Could not parse git clone URL. Please specify the full repo URL.",
+                    "exit_code": 1
+                }
         else:
             result = await _direct_fallback(tool, content, progress_cb=progress_cb) \
                 or {"error": f"{tool}: execution failed", "exit_code": 1}
