@@ -82,6 +82,9 @@ MAX_WEB_FETCH_PER_SESSION = 12  # cap web_fetch calls per stream_agent_loop run
 MAX_WEB_SEARCH_PER_SESSION = 6  # cap web_search calls per run
 MAX_BASH_PER_SESSION = 15       # cap bash/python shell-ish tools per run
 
+# Headroom compression: compress tool outputs above this threshold
+COMPRESS_THRESHOLD = 500    # chars — below this, skip Headroom compression
+
 # web_fetch response-size policy (#3812). MAX_OUTPUT_CHARS above only trims
 # what the agent SEES; these caps bound what the server downloads, parses,
 # and writes to the content cache. The soft cap is the default download

@@ -94,6 +94,54 @@ from src.agent_loop.tool_runner import (
 logger = logging.getLogger(__name__)
 
 
+
+# --- Headroom compression support ---
+_headroom_compress = None
+
+def _init_headroom():
+    global _headroom_compress
+    if _headroom_compress is not None:
+        return
+    try:
+        from headroom import compress as _compress
+        def _compress_tool_output(text: str) -> str:
+            # We compress by sending a single user message payload
+            res = _compress([{"role": "user", "content": text}])
+            if isinstance(res, list) and res:
+                return res[0].get("content", text)
+            return text
+        _headroom_compress = _compress_tool_output
+        logger.info("[headroom] compressor loaded successfully")
+    except ImportError:
+        logger.info("[headroom] not installed, defaulting to _truncate")
+    except Exception as e:
+        logger.warning(f"[headroom] failed to initialize: {e}")
+
+# Call init immediately (lazy setup check)
+try:
+    _init_headroom()
+except Exception:
+    pass
+
+
+
+def _smart_truncate(raw_text: str) -> str:
+    """Compress tool output intelligently using Headroom, falling back to simple char truncation."""
+    from src.constants import COMPRESS_THRESHOLD
+    from src.tool_utils import _truncate
+    
+    if not isinstance(raw_text, str):
+        raw_text = str(raw_text) if raw_text is not None else ""
+        
+    if _headroom_compress and len(raw_text) >= COMPRESS_THRESHOLD:
+        try:
+            return _headroom_compress(raw_text)
+        except Exception as e:
+            logger.debug(f"[headroom] compression failed, falling back to _truncate: {e}")
+            
+    return _truncate(raw_text)
+
+
 async def stream_agent_loop(
     endpoint_url: str,
     model: str,
@@ -1244,19 +1292,19 @@ async def stream_agent_loop(
                 # empty) stdout/stderr; fall back to the error so the "timed
                 # out" reason reaches the UI instead of a blank result.
                 raw = result["stdout"] or result["stderr"] or result.get("error", "")
-                output_text = _truncate(raw)
+                output_text = _smart_truncate(raw)
             elif "output" in result:
                 # bash / python canonical result: {"output": ..., "exit_code": ...}
                 raw = result["output"] or ""
-                output_text = _truncate(raw)
+                output_text = _smart_truncate(raw)
             elif "response" in result:
                 # AI interaction tools (chat_with_model, send_to_session)
                 label = result.get("model", result.get("session_name", "AI"))
-                output_text = _truncate(f"{label}: {result['response']}")
+                output_text = _smart_truncate(f"{label}: {result['response']}")
             elif "content" in result:
-                output_text = _truncate(result["content"])
+                output_text = _smart_truncate(result["content"])
             elif "results" in result:
-                output_text = _truncate(result["results"])
+                output_text = _smart_truncate(result["results"])
             elif "session_id" in result and "name" in result:
                 output_text = f"Session created: {result['name']} (id: {result['session_id']})"
             elif "success" in result:
@@ -1266,7 +1314,7 @@ async def stream_agent_loop(
                     else f"Error: {result.get('error', '')}"
                 )
             elif "error" in result:
-                output_text = _truncate(result["error"])
+                output_text = _smart_truncate(result["error"])
 
             # Emit tool_output (include ui_event data if present)
             tool_output_data = {"type": "tool_output", "tool": block.tool_type, "command": cmd_display, "output": output_text, "exit_code": result.get("exit_code")}

@@ -49,3 +49,6 @@ pytest-asyncio
 # TestClient import when only classic httpx is present. Runtime code keeps
 # using `httpx` above; this is test-client only.
 httpx2
+
+# Headroom for tool output compression
+headroom-ai[ml]>=0.32.0
