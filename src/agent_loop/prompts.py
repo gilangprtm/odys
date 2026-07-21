@@ -694,6 +694,16 @@ def _assemble_prompt(tool_names: set, disabled_tools: set = None, compact: bool 
 
     parts.append(_AGENT_RULES)
     parts.extend(_domain_rules_for_tools(included))
+
+    # Append persistent rules (loaded from ~/.odys/rules/ etc.)
+    try:
+        from src.rules.engine import render_rules
+        _rules_section = render_rules(max_tokens=2000)
+        if _rules_section:
+            parts.append(_rules_section)
+    except Exception as e:
+        logger.debug("Rules injection skipped: %s", e)
+
     return "\n\n".join(parts)
 
 

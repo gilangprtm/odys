@@ -266,6 +266,17 @@ async def stream_agent_loop(
     except Exception as e:
         logger.debug("[skills] Init skipped: %s", e)
 
+    # Initialize rules engine once per session
+    try:
+        from src.rules.engine import get_engine
+        _re = get_engine()
+        if not _re.loaded:
+            _n_rules = _re.reload()
+            if _n_rules > 0:
+                logger.info("[rules] Loaded %s rule(s)", _n_rules)
+    except Exception as e:
+        logger.debug("[rules] Init skipped: %s", e)
+
     # Tool Selection (Hermes style)
     _relevant_tools = relevant_tools
     _t1 = time.time()
