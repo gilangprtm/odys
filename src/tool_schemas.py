@@ -1230,6 +1230,21 @@ FUNCTION_TOOL_SCHEMAS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "delegate_task",
+            "description": "Spawn an isolated sub-agent to work on a background task (research, code analysis, multi-file inspection). The sub-agent runs autonomously with its own loop and tools. Returns its final answer. Use for any task that would benefit from parallel or independent reasoning.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "goal": {"type": "string", "description": "Brief goal description (one line)"},
+                    "context": {"type": "string", "description": "Background context, constraints, file paths"}
+                },
+                "required": ["goal", "context"]
+            }
+        }
+    },
 ]
 
 
@@ -1576,6 +1591,8 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
         # them once; pre-escaping here caused literal ``\u00f1`` sequences to
         # remain visible in the debug panel.
         content = json.dumps(args, ensure_ascii=False)
+    elif tool_type == "delegate_task":
+        content = args.get("goal", "") + "\n" + args.get("context", "")
     else:
         content = json.dumps(args)
 

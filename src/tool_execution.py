@@ -970,6 +970,11 @@ async def _execute_tool_block_impl(
     elif tool in ("pipeline", "manage_memory", "ui_control"):
         from src.ai_interaction import dispatch_ai_tool
         desc, result = await dispatch_ai_tool(tool, content, session_id, owner=owner)
+    elif tool == "delegate_task":
+        from src.agent_tools.subagent_tools import delegate_task as do_delegate_task
+        desc = "delegate_task"
+        result = await do_delegate_task(content, session_id=session_id, owner=owner)
+
     elif tool == "manage_tasks":
         desc = "manage_tasks"
         result = await do_manage_tasks(content, owner=owner)

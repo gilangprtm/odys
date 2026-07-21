@@ -406,6 +406,33 @@ async def stream_agent_loop(
             messages[0]["content"] = GUIDE_ONLY_DIRECTIVE + "\n\n" + (messages[0].get("content") or "")
         else:
             messages.insert(0, {"role": "system", "content": GUIDE_ONLY_DIRECTIVE})
+    try:
+        from services import odys_neuron_service as _neurons
+        _last_user_msg = next((m.get("content", "") for m in reversed(messages) if m.get("role") == "user" and isinstance(m.get("content"), str)), "")
+        if _last_user_msg:
+            _n_result = _neurons.activate(query=_last_user_msg, top_k=5)
+            if _n_result.get("ok") and _n_result.get("results"):
+                _n_texts = []
+                for res in _n_result["results"]:
+                    _lbl = res.get("label", "")
+                    _ref = res.get("ref", "")
+                    _typ = res.get("type", "")
+                    if _lbl:
+                        _line = f"- [{_typ}] {_lbl}"
+                        if _ref:
+                            _line += f" (id={_ref})"
+                        _n_texts.append(_line)
+                
+                if _n_texts:
+                    _mem_str = "## Relevant Background Memory (auto-recalled)\n" + "\n".join(_n_texts)
+                    if messages and messages[0].get("role") == "system":
+                        messages[0]["content"] = messages[0].get("content", "") + "\n\n" + _mem_str
+                    else:
+                        messages.insert(0, {"role": "system", "content": _mem_str})
+                    logger.info(f"[neuron] Injected {len(_n_texts)} active memory nodes based on user query")
+    except Exception as e:
+        logger.warning(f"[neuron] Auto-injection skipped/failed: {e}")
+
     prep_timings["prompt_build"] = time.time() - _t2
 
     _t3 = time.time()

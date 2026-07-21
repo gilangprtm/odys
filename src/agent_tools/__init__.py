@@ -33,6 +33,8 @@ from .admin_tools import (
     do_manage_tokens, do_manage_settings,
 )
 
+from .subagent_tools import delegate_task as do_delegate_task
+
 TOOL_HANDLERS = {
     "bash": BashTool().execute,
     "python": PythonTool().execute,
@@ -60,6 +62,7 @@ TOOL_HANDLERS = {
     "list_sessions": ListSessionsTool().execute,
     "send_to_session": SendToSessionTool().execute,
     "manage_session": ManageSessionTool().execute,
+    "delegate_task": do_delegate_task,
     "search_chats": do_search_chats,
 }
 # Config/integration admin tools (manage_endpoints/mcp/webhooks/tokens/settings).
@@ -87,6 +90,7 @@ TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_fi
              "suggest_document",
              "manage_endpoints", "manage_mcp", "manage_webhooks",
              "manage_tokens", "manage_documents", "manage_settings",
+             "delegate_task",
              "manage_notes", "manage_calendar",
              "resolve_contact", "manage_contact",
              # Email tool names come from BUILTIN_EMAIL_TOOLS (unioned below)
