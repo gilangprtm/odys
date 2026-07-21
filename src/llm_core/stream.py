@@ -86,7 +86,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                             max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
                             timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
                             tools: Optional[List[Dict]] = None, session_id: Optional[str] = None,
-                            tool_choice_none: bool = False):
+                            tool_choice_none: bool = False, max_retries: int = LLMConfig.MAX_RETRIES):
     """Stream LLM responses with improved error handling.
 
     Yields SSE chunks:
@@ -387,7 +387,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             yield f'event: error\ndata: {json.dumps({"error": str(e), "status": 502})}\n\n'
         return
 
-    # ── OpenAI-compatible streaming ──
+        # ── OpenAI-compatible streaming with retry ──
     _tc_acc: Dict[int, Dict] = {}
     _tc_last_idx = [-1]
     _thinking_model = _supports_thinking(model)
@@ -413,136 +413,160 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                 events.append(_stream_delta_event(part, thinking=True))
                 continue
             if _thinking_model and not _first_content_sent and part.lstrip().lower().startswith("</think"):
-                part = "<think>" + part
+                part = "?" + part
             _first_content_sent = True
             events.append(_stream_delta_event(part))
         return events
 
-    try:
-        client = _get_http_client()
-        h = await apply_kimi_code_headers_async(client, h, target_url)
-        async with client.stream('POST', target_url, json=payload, headers=h, timeout=stream_timeout) as r:
-            _clear_host_dead(target_url)
-            if r.status_code != 200:
-                raw = (await r.aread()).decode(errors="replace")
-                friendly = _format_upstream_error(r.status_code, raw, target_url)
-                yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500]})}\n\n'
-                return
+    # Retry loop for transient errors (connect/timeout/5xx before any content is emitted)
+    _openai_retries = max_retries
+    _openai_attempt = 0
+    _emitted_content = False
+    _last_openai_exc = None
 
-            async for line in r.aiter_lines():
-                if not line:
-                    continue
-                if line.startswith("data:"):
-                    data = line[5:].strip()
-                    if data == "[DONE]":
-                        for event in _format_routed_content(_harmony_router.flush()):
-                            yield event
-                        tc_event = _emit_tool_calls()
-                        if tc_event:
-                            yield tc_event
-                        yield "data: [DONE]\n\n"
-                        return
+    while _openai_attempt < _openai_retries:
+        _openai_attempt += 1
+        _tc_acc.clear()
+        _tc_last_idx[0] = -1
+        _harmony_router = _HarmonyStreamRouter()
+        _actual_model = ""
+        _actual_model_announced = False
+        _first_content_sent = False
+        _in_think_tag = False
+        _think_open_stripped = False
+        _harmony_active = False
 
-                    try:
-                        if data.strip():
-                            if data.startswith("{"):
-                                j = json.loads(data)
-                                chunk_model = j.get("model")
-                                if isinstance(chunk_model, str) and chunk_model.strip():
-                                    _actual_model = chunk_model.strip()
-                                    if not _actual_model_announced and not _same_model_identity(_actual_model, model):
-                                        _actual_model_announced = True
-                                        yield f'data: {json.dumps({"type": "model_actual", "requested_model": model, "model": _actual_model})}\n\n'
-                                _choices = j.get("choices") or []
-                                _delta0 = _choices[0].get("delta") if (_choices and _choices[0] is not None) else None
-                                _delta_has_output = isinstance(_delta0, dict) and (
-                                    _delta0.get("content")
-                                    or _delta0.get("reasoning_content")
-                                    or _delta0.get("reasoning")
-                                    or _delta0.get("thinking")
-                                    or _delta0.get("tool_calls")
-                                )
-                                if "usage" in j and not _delta_has_output:
-                                    u = j["usage"] or {}
-                                    _usage_data = {"input_tokens": u.get("prompt_tokens", 0), "output_tokens": u.get("completion_tokens", 0)}
-                                    _tm = j.get("timings")
-                                    if isinstance(_tm, dict):
-                                        if _tm.get("predicted_per_second"):
-                                            _usage_data["gen_tps"] = round(_tm["predicted_per_second"], 2)
-                                        if _tm.get("prompt_per_second"):
-                                            _usage_data["prefill_tps"] = round(_tm["prompt_per_second"], 2)
-                                    if _actual_model:
-                                        _usage_data["model"] = _actual_model
-                                        if not _same_model_identity(_actual_model, model):
-                                            _usage_data["requested_model"] = model
-                                    yield f'data: {json.dumps({"type": "usage", "data": _usage_data})}\n\n'
-                                elif "choices" in j:
-                                    _c0 = (j["choices"] or [None])[0]
-                                    if _c0 is None:
-                                        continue
-                                    delta = _c0.get("delta") or {}
-                                    if isinstance(delta, dict):
-                                        reasoning = delta.get("reasoning_content") or delta.get("reasoning") or delta.get("thinking") or ""
-                                        content = delta.get("content") or ""
-                                        if isinstance(content, list):
-                                            text_part, thinking_part = _normalize_mistral_content(content)
-                                            if thinking_part:
-                                                reasoning = (reasoning + thinking_part) if reasoning else thinking_part
-                                            content = text_part
-                                        if reasoning:
-                                            _degenerate = degenerate_guard.check(reasoning)
-                                            if _degenerate:
-                                                yield _degenerate
-                                                return
-                                            yield _stream_delta_event(reasoning, thinking=True)
-                                        if content:
-                                            content = _strip_visible_chat_template_artifacts(content)
-                                            if not content:
-                                                continue
-                                            _degenerate = degenerate_guard.check(content)
-                                            if _degenerate:
-                                                yield _degenerate
-                                                return
-                                            content = re.sub(r"<mm:think(\s+[^>]*)?>", r"<think\1>", content, flags=re.IGNORECASE)
-                                            content = re.sub(r"</mm:think>", "</think>", content, flags=re.IGNORECASE)
-                                            stripped = content.lstrip()
-                                            if _harmony_active or "<|" in content:
-                                                _harmony_active = True
-                                                for event in _format_routed_content(_harmony_router.feed(content)):
-                                                    yield event
-                                            else:
-                                                if not _first_content_sent and not _thinking_model and not _in_think_tag and stripped.lower().startswith("<think"):
-                                                    _thinking_model = True
-                                                    _in_think_tag = True
-                                                if _in_think_tag:
-                                                    close_idx = content.lower().find("</think>")
-                                                    if close_idx != -1:
-                                                        think_part = content[:close_idx]
-                                                        if not _think_open_stripped:
-                                                            tag_end = think_part.lower().find(">")
-                                                            if tag_end != -1:
-                                                                think_part = think_part[tag_end + 1:]
-                                                            _think_open_stripped = True
-                                                        regular_part = content[close_idx + len("</think>"):]
-                                                        _in_think_tag = False
-                                                        if think_part:
-                                                            yield f'data: {json.dumps({"delta": think_part, "thinking": True})}\n\n'
-                                                        if regular_part:
-                                                            _first_content_sent = True
-                                                            yield f'data: {json.dumps({"delta": regular_part})}\n\n'
-                                                    else:
-                                                        if not _think_open_stripped:
-                                                            tag_end = stripped.lower().find(">")
-                                                            if tag_end != -1:
-                                                                content = stripped[tag_end + 1:]
-                                                            _think_open_stripped = True
-                                                        if content:
-                                                            yield f'data: {json.dumps({"delta": content, "thinking": True})}\n\n'
+        try:
+            client = _get_http_client()
+            h = await apply_kimi_code_headers_async(client, h, target_url)
+            async with client.stream('POST', target_url, json=payload, headers=h, timeout=stream_timeout) as r:
+                _clear_host_dead(target_url)
+                if r.status_code != 200:
+                    raw = (await r.aread()).decode(errors="replace")
+                    friendly = _format_upstream_error(r.status_code, raw, target_url)
+                    if not _emitted_content and r.status_code in (429, 502, 503, 504) and _openai_attempt < _openai_retries:
+                        _last_openai_exc = f"HTTP {r.status_code}: {friendly}"
+                        logger.warning(f"[retry] attempt {_openai_attempt}: upstream {_host_key(target_url)} returned {r.status_code}, retrying in {LLMConfig.RETRY_DELAY*_openai_attempt:.0f}s")
+                        await asyncio.sleep(LLMConfig.RETRY_DELAY * _openai_attempt)
+                        continue  # retry the whole stream
+                    yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500]})}\n\n'
+                    return
+
+                async for line in r.aiter_lines():
+                    if not line:
+                        continue
+                    if line.startswith("data:"):
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            for event in _format_routed_content(_harmony_router.flush()):
+                                yield event
+                            tc_event = _emit_tool_calls()
+                            if tc_event:
+                                yield tc_event
+                            yield "data: [DONE]\n\n"
+                            return
+
+                        try:
+                            if data.strip():
+                                if data.startswith("{"):
+                                    j = json.loads(data)
+                                    _emitted_content = True
+                                    chunk_model = j.get("model")
+                                    if isinstance(chunk_model, str) and chunk_model.strip():
+                                        _actual_model = chunk_model.strip()
+                                        if not _actual_model_announced and not _same_model_identity(_actual_model, model):
+                                            _actual_model_announced = True
+                                            yield f'data: {json.dumps({"type": "model_actual", "requested_model": model, "model": _actual_model})}\n\n'
+                                    _choices = j.get("choices") or []
+                                    _delta0 = _choices[0].get("delta") if (_choices and _choices[0] is not None) else None
+                                    _delta_has_output = isinstance(_delta0, dict) and (
+                                        _delta0.get("content")
+                                        or _delta0.get("reasoning_content")
+                                        or _delta0.get("reasoning")
+                                        or _delta0.get("thinking")
+                                        or _delta0.get("tool_calls")
+                                    )
+                                    if "usage" in j and not _delta_has_output:
+                                        u = j["usage"] or {}
+                                        _usage_data = {"input_tokens": u.get("prompt_tokens", 0), "output_tokens": u.get("completion_tokens", 0)}
+                                        _tm = j.get("timings")
+                                        if isinstance(_tm, dict):
+                                            if _tm.get("predicted_per_second"):
+                                                _usage_data["gen_tps"] = round(_tm["predicted_per_second"], 2)
+                                            if _tm.get("prompt_per_second"):
+                                                _usage_data["prefill_tps"] = round(_tm["prompt_per_second"], 2)
+                                        if _actual_model:
+                                            _usage_data["model"] = _actual_model
+                                            if not _same_model_identity(_actual_model, model):
+                                                _usage_data["requested_model"] = model
+                                        yield f'data: {json.dumps({"type": "usage", "data": _usage_data})}\n\n'
+                                    elif "choices" in j:
+                                        _c0 = (j["choices"] or [None])[0]
+                                        if _c0 is None:
+                                            continue
+                                        delta = _c0.get("delta") or {}
+                                        if isinstance(delta, dict):
+                                            reasoning = delta.get("reasoning_content") or delta.get("reasoning") or delta.get("thinking") or ""
+                                            content = delta.get("content") or ""
+                                            if isinstance(content, list):
+                                                text_part, thinking_part = _normalize_mistral_content(content)
+                                                if thinking_part:
+                                                    reasoning = (reasoning + thinking_part) if reasoning else thinking_part
+                                                content = text_part
+                                            if reasoning:
+                                                _degenerate = degenerate_guard.check(reasoning)
+                                                if _degenerate:
+                                                    yield _degenerate
+                                                    return
+                                                yield _stream_delta_event(reasoning, thinking=True)
+                                            if content:
+                                                content = _strip_visible_chat_template_artifacts(content)
+                                                if not content:
+                                                    continue
+                                                _degenerate = degenerate_guard.check(content)
+                                                if _degenerate:
+                                                    yield _degenerate
+                                                    return
+                                                content = re.sub(r"<mm:think(\s+[^>]*)?>", r"<think\1>", content, flags=re.IGNORECASE)
+                                                content = re.sub(r"</mm:think>", "?", content, flags=re.IGNORECASE)
+                                                stripped = content.lstrip()
+                                                if _harmony_active or "<|" in content:
+                                                    _harmony_active = True
+                                                    for event in _format_routed_content(_harmony_router.feed(content)):
+                                                        yield event
                                                 else:
-                                                    if _thinking_model and not _first_content_sent and stripped.lower().startswith("</think"):
-                                                        content = "<think>" + content
-                                                    _first_content_sent = True
-                                                    yield f'data: {json.dumps({"delta": content})}\n\n'
+                                                    if not _first_content_sent and not _thinking_model and not _in_think_tag and stripped.lower().startswith("<think"):
+                                                        _thinking_model = True
+                                                        _in_think_tag = True
+                                                    if _in_think_tag:
+                                                        close_idx = content.lower().find("?")
+                                                        if close_idx != -1:
+                                                            think_part = content[:close_idx]
+                                                            if not _think_open_stripped:
+                                                                tag_end = think_part.lower().find(">")
+                                                                if tag_end != -1:
+                                                                    think_part = think_part[tag_end + 1:]
+                                                                _think_open_stripped = True
+                                                            regular_part = content[close_idx + len("?"):]
+                                                            _in_think_tag = False
+                                                            if think_part:
+                                                                yield f'data: {json.dumps({"delta": think_part, "thinking": True})}\n\n'
+                                                            if regular_part:
+                                                                _first_content_sent = True
+                                                                yield f'data: {json.dumps({"delta": regular_part})}\n\n'
+                                                        else:
+                                                            if not _think_open_stripped:
+                                                                tag_end = stripped.lower().find(">")
+                                                                if tag_end != -1:
+                                                                    content = stripped[tag_end + 1:]
+                                                                _think_open_stripped = True
+                                                            if content:
+                                                                yield f'data: {json.dumps({"delta": content, "thinking": True})}\n\n'
+                                                    else:
+                                                        if _thinking_model and not _first_content_sent and stripped.lower().startswith("</think"):
+                                                            content = "?" + content
+                                                        _first_content_sent = True
+                                                        yield f'data: {json.dumps({"delta": content})}\n\n'
                                         for tc in delta.get("tool_calls") or []:
                                             if tc is None:
                                                 continue
@@ -568,37 +592,66 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                                 _tc_acc[idx]["arguments"] += func["arguments"] or ""
                                                 if func["arguments"] and _tc_acc[idx].get("name") in ("create_document", "update_document", "edit_document"):
                                                     yield f'data: {json.dumps({"type": "tool_call_delta", "index": idx, "name": _tc_acc[idx]["name"], "arg_delta": func["arguments"]})}\n\n'
-                                elif "text" in j:
-                                    if j["text"]:
-                                        for event in _format_routed_content(_harmony_router.feed(j["text"])):
+                                    elif "text" in j:
+                                        if j["text"]:
+                                            for event in _format_routed_content(_harmony_router.feed(j["text"])):
+                                                yield event
+                                else:
+                                    if data.strip():
+                                        for event in _format_routed_content(_harmony_router.feed(data)):
                                             yield event
-                            else:
-                                if data.strip():
-                                    for event in _format_routed_content(_harmony_router.feed(data)):
-                                        yield event
-                    except Exception as e:
-                        logger.error(f"Error parsing stream data: {e}")
-                        continue
+                        except Exception as e:
+                            logger.error(f"Error parsing stream data: {e}")
+                            continue
 
-            for event in _format_routed_content(_harmony_router.flush()):
-                yield event
-            tc_event = _emit_tool_calls()
-            if tc_event:
-                yield tc_event
-            yield "data: [DONE]\n\n"
+                # Stream ended without DONE marker
+                for event in _format_routed_content(_harmony_router.flush()):
+                    yield event
+                tc_event = _emit_tool_calls()
+                if tc_event:
+                    yield tc_event
+                yield "data: [DONE]\n\n"
+                return
 
-    except (httpx.ConnectError, httpx.ConnectTimeout) as e:
-        _cooled = _mark_host_dead(target_url)
-        _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else " — transient, will retry"
-        logger.warning(f"Stream connect to {target_url} failed: {e}{_tail}")
-        yield f'event: error\ndata: {json.dumps({"error": f"Cannot reach {_host_key(target_url)}", "status": 503})}\n\n'
-    except httpx.ReadTimeout:
-        yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
-    except httpx.NetworkError:
-        yield f'event: error\ndata: {json.dumps({"error": "Network error", "status": 502})}\n\n'
-    except Exception as e:
-        logger.error(f"Stream error: {e}")
-        yield f'event: error\ndata: {json.dumps({"error": str(e), "status": 502})}\n\n'
+        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+            _cooled = _mark_host_dead(target_url)
+            if not _emitted_content and _openai_attempt < _openai_retries and not _cooled:
+                _last_openai_exc = str(e)
+                logger.warning(f"[retry] attempt {_openai_attempt}: connect to {_host_key(target_url)} failed: {e}. retrying in {LLMConfig.RETRY_DELAY*_openai_attempt:.0f}s")
+                await asyncio.sleep(LLMConfig.RETRY_DELAY * _openai_attempt)
+                continue
+            _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else ""
+            logger.warning(f"Stream connect to {target_url} failed: {e}{_tail}")
+            yield f'event: error\ndata: {json.dumps({"error": f"Cannot reach {_host_key(target_url)}", "status": 503})}\n\n'
+            return
+        except httpx.ReadTimeout as e:
+            if not _emitted_content and _openai_attempt < _openai_retries:
+                _last_openai_exc = str(e)
+                logger.warning(f"[retry] attempt {_openai_attempt}: read timeout from {_host_key(target_url)}. retrying in {LLMConfig.RETRY_DELAY*_openai_attempt:.0f}s")
+                await asyncio.sleep(LLMConfig.RETRY_DELAY * _openai_attempt)
+                continue
+            yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
+            return
+        except httpx.NetworkError as e:
+            if not _emitted_content and _openai_attempt < _openai_retries:
+                _last_openai_exc = str(e)
+                logger.warning(f"[retry] attempt {_openai_attempt}: network error from {_host_key(target_url)}. retrying in {LLMConfig.RETRY_DELAY*_openai_attempt:.0f}s")
+                await asyncio.sleep(LLMConfig.RETRY_DELAY * _openai_attempt)
+                continue
+            yield f'event: error\ndata: {json.dumps({"error": "Network error", "status": 502})}\n\n'
+            return
+        except Exception as e:
+            if not _emitted_content and _openai_attempt < _openai_retries:
+                _last_openai_exc = str(e)
+                logger.warning(f"[retry] attempt {_openai_attempt}: {type(e).__name__}: {e}. retrying in {LLMConfig.RETRY_DELAY*_openai_attempt:.0f}s")
+                await asyncio.sleep(LLMConfig.RETRY_DELAY * _openai_attempt)
+                continue
+            logger.error(f"Stream error: {e}")
+            yield f'event: error\ndata: {json.dumps({"error": str(e), "status": 502})}\n\n'
+            return
+
+    # All retries exhausted
+    yield f'event: error\ndata: {json.dumps({"error": f"All {_openai_retries} retries exhausted: {_last_openai_exc}", "status": 502})}\n\n'
 
 
 def _summarize_stream_error(err_chunk: Optional[str]) -> str:
