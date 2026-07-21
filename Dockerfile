@@ -1,13 +1,8 @@
 # ---- builder: patch + build wheels for Real-ESRGAN's broken-on-3.14 deps ----
-# basicsr/gfpgan/facexlib read their version via exec()+locals()['__version__'],
-# which raises KeyError on Python 3.13+ (PEP 667). Build patched wheels here so
-# the final image / Cookbook never has to compile the broken sdists. See
-# docker/build-realesrgan-wheels.sh for the full rationale.
+# Real-ESRGAN needs torch+CUDA (~2.5GB). Skipped on VPS CPU-only.
+# To re-enable: restore the original docker/build-realesrgan-wheels.sh.
 FROM python:3.14-slim AS realesrgan-wheels
-RUN apt-get update && apt-get install -y --no-install-recommends curl \
-    && rm -rf /var/lib/apt/lists/*
-COPY docker/build-realesrgan-wheels.sh /usr/local/bin/build-realesrgan-wheels.sh
-RUN bash /usr/local/bin/build-realesrgan-wheels.sh /wheels
+RUN echo "[SKIPPED] realesrgan-wheels -- no GPU, no torch" > /dev/null
 
 FROM python:3.14-slim
 
@@ -86,8 +81,8 @@ RUN pip install --no-cache-dir python-magic==0.4.27
 # pulled only when realesrgan is actually installed). With these dists already
 # satisfied, the Cookbook's plain `pip install realesrgan` resolves them from
 # wheels instead of rebuilding the sdists that fail on Python 3.14.
-COPY --from=realesrgan-wheels /wheels/ /tmp/odysseus-wheels/
-RUN pip install --no-cache-dir --no-deps /tmp/odysseus-wheels/*.whl \
+# COPY --from=realesrgan-wheels /wheels/ /tmp/odysseus-wheels/
+# RUN pip install --no-cache-dir --no-deps /tmp/odysseus-wheels/*.whl \
     && rm -rf /tmp/odysseus-wheels
 
 # Copy app code
