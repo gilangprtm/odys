@@ -975,6 +975,11 @@ async def _execute_tool_block_impl(
         desc = "delegate_task"
         result = await do_delegate_task(content, session_id=session_id, owner=owner)
 
+    elif tool.startswith("skill_"):
+        from src.skills.registry import get_registry
+        desc = tool
+        result = await get_registry().execute_skill(tool, content)
+
     elif tool == "manage_tasks":
         desc = "manage_tasks"
         result = await do_manage_tasks(content, owner=owner)

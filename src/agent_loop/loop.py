@@ -255,6 +255,17 @@ async def stream_agent_loop(
         disabled_tools.update(_mcp_block_q)
     prep_timings["request_setup"] = time.time() - _t0
 
+    # Initialize skill registry (ECC skills) once per session
+    try:
+        from src.skills.registry import get_registry
+        _reg = get_registry()
+        if not _reg.loaded:
+            _n = _reg.reload()
+            if _n > 0:
+                logger.info("[skills] Loaded %s ECC skill(s)", _n)
+    except Exception as e:
+        logger.debug("[skills] Init skipped: %s", e)
+
     # Tool Selection (Hermes style)
     _relevant_tools = relevant_tools
     _t1 = time.time()
@@ -617,11 +628,26 @@ async def stream_agent_loop(
                 ]
                 all_tool_schemas = base_schemas + mcp_schemas
             if disabled_tools:
-                all_tool_schemas = [
-                    t for t in all_tool_schemas
-                    if t.get("function", {}).get("name") not in disabled_tools
-                    and t.get("name") not in disabled_tools
-                ]
+                    all_tool_schemas = [
+                        t for t in all_tool_schemas
+                        if t.get("function", {}).get("name") not in disabled_tools
+                        and t.get("name") not in disabled_tools
+                    ]
+
+            # Append skill schemas (dynamic ECC skills)
+            try:
+                from src.skills.registry import get_registry
+                _reg = get_registry()
+                if _reg.loaded and _reg.tool_names:
+                    _skill_schemas = _reg.get_all_schemas()
+                    if disabled_tools:
+                        _skill_schemas = [
+                            s for s in _skill_schemas
+                            if s.get("function", {}).get("name") not in disabled_tools
+                        ]
+                    all_tool_schemas.extend(_skill_schemas)
+            except Exception:
+                pass
         else:
             # Local: only MCP schemas when message suggests MCP tool usage
             _last_content = _last_user.lower()

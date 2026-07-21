@@ -1593,6 +1593,8 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
         content = json.dumps(args, ensure_ascii=False)
     elif tool_type == "delegate_task":
         content = args.get("goal", "") + "\n" + args.get("context", "")
+    elif tool_type.startswith("skill_"):
+        content = args.get("instruction", "")
     else:
         content = json.dumps(args)
 
