@@ -60,9 +60,13 @@ class RulesEngine:
     def __post_init__(self):
         if self.search_dirs is None:
             home = Path.home()
+            _this_dir = Path(__file__).resolve().parent
+            _repo_root = _this_dir.parent.parent  # src/rules/ -> src/ -> repo root
             self.search_dirs = [
                 home / ".odys" / "rules",
                 Path(".odys") / "rules",
+                _repo_root / "ecc-skills" / ".claude" / "rules",
+                _repo_root / "ecc-skills" / "docs" / "rules",
             ]
 
     @property

@@ -1,0 +1,3 @@
+[submodule "ecc-skills"]
+	path = ecc-skills
+	url = https://github.com/affaan-m/ECC.git

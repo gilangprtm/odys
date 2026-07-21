@@ -38,9 +38,14 @@ class SkillRegistry:
         # Default search paths
         if search_dirs is None:
             home = Path.home()
+            # Bundled ECC skills shipped with Odys (git submodule)
+            _this_dir = Path(__file__).resolve().parent
+            _repo_root = _this_dir.parent.parent  # src/skills/ -> src/ -> repo root
+            _bundled = _repo_root / "ecc-skills" / "skills"
             search_dirs = [
                 home / ".odys" / "skills",
                 Path(".odys") / "skills",
+                _bundled,
             ]
 
         self._search_dirs = search_dirs
