@@ -502,6 +502,8 @@ async def stream_agent_loop(
     _stuck_rounds = 0
     # Retry holder for native tool call JSON parse failures
     _native_retries_holder = type('_nr', (), {'_n': 0})()
+    # Track how many tool_events we've already checked for circuit breaker errors
+    _events_processed_marker = type('_ep', (), {'_n': 0})()
     # Frequency of each exact call signature (tool + args), for the runaway
     # backstop. Counting identical repeats — not distinct same-tool calls —
     # lets a legit batch (e.g. 18 calendar events at once) through.
@@ -965,21 +967,31 @@ async def stream_agent_loop(
         _real_text = _strip_think_blocks(cleaned_round).strip()
 
         # Analyze error patterns from this round's tool results
+        # Process ONLY newly added events (not entire history) to avoid
+        # double-counting the same event across multiple rounds.
+        # Also safely handle non-int exit_code values (e.g. "n/a").
         _round_has_error = False
         _round_all_errors = bool(tool_blocks)
-        for _ev in tool_events:
-            if _ev.get("error") or _ev.get("exit_code", 0) != 0:
-                _round_has_error = True
-                # Normalize error signature: strip volatile parts
-                _err_text = (_ev.get("error") or _ev.get("output") or "")[:300]
-                _err_norm = re.sub(r"line \d+", "line N", _err_text)
-                _err_norm = re.sub(r"port \d+", "port N", _err_norm)
-                _err_norm = re.sub(r"pid \d+", "pid N", _err_norm)
-                _err_norm = re.sub(r"/tmp/[^ ]+", "/tmp/...", _err_norm)
-                _err_norm = re.sub(r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", "x.x.x.x", _err_norm)
-                _error_signatures[_err_norm[:120]] += 1
-            else:
-                _round_all_errors = False
+        _new_event_count = len(tool_events) - getattr(_events_processed_marker, "_n", 0)
+        if _new_event_count > 0:
+            for _ev in tool_events[-_new_event_count:]:
+                _ev_exit = _ev.get("exit_code")
+                _ev_err = _ev.get("error")
+                _is_error_ev = bool(_ev_err) or (isinstance(_ev_exit, (int, float)) and _ev_exit != 0)
+                if _is_error_ev:
+                    _round_has_error = True
+                    # Normalize error signature: strip volatile parts
+                    _err_text = (_ev_err or _ev.get("output") or "")[:300]
+                    _err_norm = re.sub(r"line \d+", "line N", _err_text)
+                    _err_norm = re.sub(r"port \d+", "port N", _err_norm)
+                    _err_norm = re.sub(r"pid \d+", "pid N", _err_norm)
+                    _err_norm = re.sub(r"/tmp/[^ ]+", "/tmp/...", _err_norm)
+                    _err_norm = re.sub(r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", "x.x.x.x", _err_norm)
+                    _error_signatures[_err_norm[:120]] += 1
+                else:
+                    _round_all_errors = False
+        else:
+            _round_all_errors = False
 
         if not _real_text and not _round_has_error:
             _round_all_errors = False  # no tool errors = not "all errors"
@@ -1003,6 +1015,9 @@ async def stream_agent_loop(
         # ── Circuit breaker triggers ──
         _cb_tripped = False
         _cb_reason = ""
+
+        # Update events-processed marker for next round
+        object.__setattr__(_events_processed_marker, "_n", len(tool_events))
 
         # 1. Duplicate call loop (same as before)
         if _stuck_rounds >= 3:
