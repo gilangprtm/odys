@@ -468,6 +468,12 @@ def _empty_response_fallback(
     full_response: str,
     round_reasoning: str,
     tool_events: list,
+    messages: list = None,
+    endpoint_url: str = None,
+    model: str = None,
+    headers: dict = None,
+    temperature: float = 0.3,
+    max_tokens: int = 4096,
 ) -> tuple:
     """Return (final_response, sse_chunk_or_none) for the end-of-loop empty-response guard.
 
@@ -476,14 +482,63 @@ def _empty_response_fallback(
     The reasoning was already streamed as {thinking:true} chunks — do not
     re-emit it as a normal delta.  Just persist it and yield nothing.
 
+    If we have tool_events but no final answer, attempt ONE synthesis call
+    to produce a coherent response from gathered data before giving up.
+
     Returns:
         (final_response: str, chunk: str | None)
             chunk is the SSE string to yield, or None if nothing should be emitted.
     """
-    if full_response.strip() or tool_events:
+    if full_response.strip():
         return full_response, None
+    if round_reasoning.strip() and not tool_events:
+        return round_reasoning, None
+        
+    # Attempt synthesis if we have tool events (data gathered) but no text answer
+    if tool_events and messages and endpoint_url:
+        try:
+            from src.llm_core import llm_call_async
+            import asyncio
+            _synth_messages = list(messages) + [{
+                "role": "user",
+                "content": (
+                    "Using ONLY the information already gathered above, write "
+                    "the final answer for the user now. Do NOT call any tools, "
+                    "do NOT explain your reasoning — output the finished response "
+                    "directly. If some data couldn't be fetched, just work with "
+                    "what you have and note what's missing in one short line."
+                ),
+            }]
+            
+            # Run async function in synchronous loop context
+            try:
+                loop = asyncio.get_running_loop()
+                _synth_raw = loop.run_until_complete(
+                    llm_call_async(
+                        url=endpoint_url, model=model, messages=_synth_messages,
+                        headers=headers, temperature=temperature, max_tokens=max_tokens, timeout=45,
+                    )
+                )
+            except RuntimeError:
+                _synth_raw = asyncio.run(
+                    llm_call_async(
+                        url=endpoint_url, model=model, messages=_synth_messages,
+                        headers=headers, temperature=temperature, max_tokens=max_tokens, timeout=45,
+                    )
+                )
+                
+            from src.agent_loop.loop import strip_tool_blocks, _strip_think_blocks
+            _synth = _strip_think_blocks(strip_tool_blocks(_synth_raw or "")).strip()
+            if _synth:
+                return _synth, f'data: {json.dumps({"delta": _synth})}\n\n'
+        except Exception as _e:
+            import logging
+            logging.getLogger("agent").warning(f"[agent] fallback grace synthesis failed: {_e}")
+
+    # Fallback to last reasoning block if available as a last resort
     if round_reasoning.strip():
         return round_reasoning, None
+
     _error_msg = "The model returned an empty response. Please try again or switch to a different model."
     return _error_msg, f'data: {json.dumps({"delta": _error_msg})}\n\n'
 

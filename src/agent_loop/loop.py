@@ -504,6 +504,8 @@ async def stream_agent_loop(
     _native_retries_holder = type('_nr', (), {'_n': 0})()
     # Track how many tool_events we've already checked for circuit breaker errors
     _events_processed_marker = type('_ep', (), {'_n': 0})()
+    # Track which tool caps we've already informed the model about (once per type)
+    _capped_tools_informed = {}
     # Frequency of each exact call signature (tool + args), for the runaway
     # backstop. Counting identical repeats — not distinct same-tool calls —
     # lets a legit batch (e.g. 18 calendar events at once) through.
@@ -1111,12 +1113,25 @@ async def stream_agent_loop(
             t_type = block.tool_type
             if t_type == "web_fetch" and _session_tool_counts.get("web_fetch", 0) >= MAX_WEB_FETCH_PER_SESSION:
                 logger.warning(f"[agent] round {round_num}: max web_fetch ({MAX_WEB_FETCH_PER_SESSION}) reached, skipping")
+                # Inform model so it adapts — append to messages, not just log
+                if _capped_tools_informed.get("web_fetch", 0) < 1:
+                    _capped_tools_informed["web_fetch"] = _capped_tools_informed.get("web_fetch", 0) + 1
+                    _cap_note = f"[SYSTEM] web_fetch calls exhausted ({MAX_WEB_FETCH_PER_SESSION}/{MAX_WEB_FETCH_PER_SESSION}). Use bash+git clone (with user confirmation) or read_file to inspect local files instead."
+                    messages.append({"role": "system", "content": _cap_note})
                 continue
             if t_type == "web_search" and _session_tool_counts.get("web_search", 0) >= MAX_WEB_SEARCH_PER_SESSION:
                 logger.warning(f"[agent] round {round_num}: max web_search ({MAX_WEB_SEARCH_PER_SESSION}) reached, skipping")
+                if _capped_tools_informed.get("web_search", 0) < 1:
+                    _capped_tools_informed["web_search"] = _capped_tools_informed.get("web_search", 0) + 1
+                    _cap_note = f"[SYSTEM] web_search calls exhausted ({MAX_WEB_SEARCH_PER_SESSION}/{MAX_WEB_SEARCH_PER_SESSION}). All results already gathered. Synthesize answer from what you have."
+                    messages.append({"role": "system", "content": _cap_note})
                 continue
             if t_type in ("bash", "python") and _session_tool_counts.get(t_type, 0) >= MAX_BASH_PER_SESSION:
                 logger.warning(f"[agent] round {round_num}: max {t_type} ({MAX_BASH_PER_SESSION}) reached, skipping")
+                if _capped_tools_informed.get(t_type, 0) < 1:
+                    _capped_tools_informed[t_type] = _capped_tools_informed.get(t_type, 0) + 1
+                    _cap_note = f"[SYSTEM] {t_type} calls exhausted ({MAX_BASH_PER_SESSION}/{MAX_BASH_PER_SESSION}). Use read-only tools or synthesize answer from gathered data."
+                    messages.append({"role": "system", "content": _cap_note})
                 continue
 
             # --- Early duplicate detection ---
@@ -1586,7 +1601,10 @@ async def stream_agent_loop(
     # If the response is completely empty and no tools were executed,
     # yield a fallback message so the user is not left hanging.
     full_response, _fallback_chunk = _empty_response_fallback(
-        full_response, round_reasoning, tool_events
+        full_response, round_reasoning, tool_events,
+        messages=messages, endpoint_url=endpoint_url,
+        model=actual_model, headers=headers,
+        temperature=0.3, max_tokens=max_tokens
     )
     if _fallback_chunk:
         yield _fallback_chunk
