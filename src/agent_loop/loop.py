@@ -103,19 +103,50 @@ def _init_headroom():
     if _headroom_compress is not None:
         return
     try:
-        from headroom import compress as _compress
+        from headroom.transforms.smart_crusher import SmartCrusher
+        _crusher = SmartCrusher()
         def _compress_tool_output(text: str) -> str:
-            # We compress by sending a single user message payload
-            res = _compress([{"role": "user", "content": text}])
-            if isinstance(res, list) and res:
-                return res[0].get("content", text)
+            """Compress tool output via Headroom SmartCrusher (content-aware)."""
+            messages = [{"role": "tool", "content": text}]
+            result = _crusher.compress(messages)
+            if isinstance(result, list) and result:
+                compressed = result[0].get("content", text)
+                if len(compressed) < len(text) * 0.5:
+                    logger.info(f"[headroom] SmartCrusher: {len(text)} -> {len(compressed)} chars ({100 - int(len(compressed)/len(text)*100)}% saved)")
+                return compressed
             return text
         _headroom_compress = _compress_tool_output
-        logger.info("[headroom] compressor loaded successfully")
+        logger.info("[headroom] SmartCrusher compressor loaded successfully")
     except ImportError:
-        logger.info("[headroom] not installed, defaulting to _truncate")
+        try:
+            from headroom import compress as _compress
+            def _compress_tool_output(text: str) -> str:
+                """Compress tool output via Headroom compress() (role=tool for ContentRouter)."""
+                messages = [{"role": "tool", "content": text}]
+                res = _compress(messages)
+                if isinstance(res, list) and res:
+                    return res[0].get("content", text)
+                return text
+            _headroom_compress = _compress_tool_output
+            logger.info("[headroom] compress() fallback loaded successfully")
+        except ImportError:
+            logger.info("[headroom] not installed, defaulting to _truncate")
+        except Exception as e:
+            logger.warning(f"[headroom] failed to initialize (compress fallback): {e}")
     except Exception as e:
-        logger.warning(f"[headroom] failed to initialize: {e}")
+        logger.warning(f"[headroom] SmartCrusher init failed, trying compress(): {e}")
+        try:
+            from headroom import compress as _compress
+            def _compress_tool_output(text: str) -> str:
+                messages = [{"role": "tool", "content": text}]
+                res = _compress(messages)
+                if isinstance(res, list) and res:
+                    return res[0].get("content", text)
+                return text
+            _headroom_compress = _compress_tool_output
+            logger.info("[headroom] compress() fallback loaded after SmartCrusher error")
+        except Exception as e2:
+            logger.warning(f"[headroom] all init failed: {e2}")
 
 # Call init immediately (lazy setup check)
 try:

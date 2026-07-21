@@ -331,22 +331,71 @@ async def llm_call_async(
                 raise HTTPException(r.status_code, friendly)
             logger.info(f"LLM async call to {target_url} succeeded in {duration:.2f}s (attempt {attempt})")
             _clear_host_dead(target_url)
-            # Handle potential "Extra data" in response (malformed JSON with trailing garbage)
-            try:
-                data = r.json()
-            except json.JSONDecodeError as e:
-                # Try to extract first valid JSON object
-                import re
-                text = r.text.strip()
-                # Find first complete JSON object
-                match = re.search(r'\{.*\}', text, re.DOTALL)
-                if match:
-                    try:
-                        data = json.loads(match.group(0))
-                    except json.JSONDecodeError:
-                        raise HTTPException(502, f"Upstream {target_url} returned invalid JSON: {e}, text: {text[:500]}")
-                else:
-                    raise HTTPException(502, f"Upstream {target_url} returned non-JSON: {text[:500]}")
+            # Handle potential "Extra data" in response or SSE stream forced by router
+            text = r.text.strip()
+            data = None
+            
+            # If text looks like SSE stream (multiple "data: " prefixes)
+            if "data:" in text:
+                try:
+                    import re
+                    # Extract content from SSE chunks
+                    content_parts = []
+                    role = "assistant"
+                    for line in text.splitlines():
+                        line = line.strip()
+                        if line.startswith("data:"):
+                            chunk_str = line[5:].strip()
+                            if chunk_str == "[DONE]":
+                                continue
+                            try:
+                                chunk = json.loads(chunk_str)
+                                if "choices" in chunk and chunk["choices"]:
+                                    delta = chunk["choices"][0].get("delta", {})
+                                    if "content" in delta and delta["content"]:
+                                        content_parts.append(delta["content"])
+                                    if "role" in delta and delta["role"]:
+                                        role = delta["role"]
+                            except Exception:
+                                pass
+                    
+                    if content_parts:
+                        full_content = "".join(content_parts)
+                        # Reconstruct a mock valid OpenAI response dict
+                        data = {
+                            "choices": [{
+                                "message": {
+                                    "role": role,
+                                    "content": full_content
+                                }
+                            }]
+                        }
+                except Exception as e:
+                    logger.warning(f"Failed to parse SSE-like response text: {e}")
+
+            if data is None:
+                try:
+                    data = r.json()
+                except json.JSONDecodeError as e:
+                    # Try to extract first valid JSON object
+                    import re
+                    # Find first complete JSON object (non-greedy)
+                    match = re.search(r'\{.*?\}', text, re.DOTALL)
+                    if match:
+                        try:
+                            data = json.loads(match.group(0))
+                        except json.JSONDecodeError:
+                            # Try greedy match as last resort
+                            match_greedy = re.search(r'\{.*\}', text, re.DOTALL)
+                            if match_greedy:
+                                try:
+                                    data = json.loads(match_greedy.group(0))
+                                except json.JSONDecodeError:
+                                    raise HTTPException(502, f"Upstream {target_url} returned invalid JSON: {e}, text: {text[:500]}")
+                            else:
+                                raise HTTPException(502, f"Upstream {target_url} returned invalid JSON: {e}, text: {text[:500]}")
+                    else:
+                        raise HTTPException(502, f"Upstream {target_url} returned non-JSON: {text[:500]}")
             try:
                 if provider == "anthropic":
                     response = _parse_anthropic_response(data)
