@@ -12,6 +12,7 @@ from src.skills.loader import discover_skills
 logger = logging.getLogger(__name__)
 
 # Canonical set of Odys tools that skills can declare.
+# Includes ECC-capitalised aliases for compatibility.
 _ODYS_TOOLS = frozenset({
     "bash", "python", "read_file", "write_file", "edit_file",
     "grep", "glob", "ls", "web_search", "web_fetch",
@@ -20,6 +21,9 @@ _ODYS_TOOLS = frozenset({
     "manage_bg_jobs", "manage_tasks", "manage_skills",
     "manage_memory", "manage_endpoints", "search_chats",
     "delegate_task", "chat_with_model", "ask_teacher", "list_models",
+    # ECC capitalized aliases
+    "Read", "Write", "Edit", "Bash", "Grep", "Glob", "Task",
+    "Search", "Fetch", "List", "Execute",
 })
 
 
