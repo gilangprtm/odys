@@ -1215,6 +1215,21 @@ FUNCTION_TOOL_SCHEMAS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_chats",
+            "description": "Search past conversation history by semantic query. Use when the user asks 'what did we discuss about X' or 'find the session where we worked on Y'. Returns matching session names, message snippets, and timestamps from your chat history.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search keywords or phrase to find in past sessions"},
+                    "limit": {"type": "integer", "description": "Max results (default 3, max 10)"}
+                },
+                "required": ["query"]
+            }
+        }
+    },
 ]
 
 
