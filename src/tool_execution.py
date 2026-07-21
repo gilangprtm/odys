@@ -849,8 +849,16 @@ async def _execute_tool_block_impl(
         # Code-navigation tools — no MCP server; run the direct implementation.
         first_line = content.split(chr(10))[0][:80]
         desc = f"{tool}: {first_line}"
-        result = await _direct_fallback(tool, content, progress_cb=progress_cb) \
-            or {"error": f"{tool}: execution failed", "exit_code": 1}
+        
+        # Git clone guard: prevent massive repos blowing up disk
+        if tool == "bash" and "git clone" in content.lower():
+            result = {
+                "error": "Execution blocked: 'git clone' is restricted due to limited disk space on this VPS. Use 'web_fetch' to read individual files or ask the user for permission first.",
+                "exit_code": 1
+            }
+        else:
+            result = await _direct_fallback(tool, content, progress_cb=progress_cb) \
+                or {"error": f"{tool}: execution failed", "exit_code": 1}
     elif tool == "manage_bg_jobs":
         # Inspect/kill detached `bash` jobs; needs session_id to scope to chat.
         desc = f"manage_bg_jobs: {content.split(chr(10))[0][:80]}"
