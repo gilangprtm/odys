@@ -215,6 +215,22 @@ async def stream_agent_loop(
     _t0 = time.time()
     _needs_admin = _detect_admin_intent(messages)
     _last_user = _extract_last_user_message(messages)
+
+    # ── UserPromptSubmit Hooks (ECC guardrails/validation) ──
+    try:
+        from src.hooks.registry import get_registry as _get_hook_reg
+        _hr = _get_hook_reg()
+        if _hr.loaded and _last_user:
+            _errs = await _hr.run_user_prompt_submit(_last_user, session_id)
+            if _errs:
+                _msg = "Blocked by UserPromptSubmit hook:\n- " + "\n- ".join(_errs)
+                yield f'data: {json.dumps({"delta": _msg})}\n\n'
+                yield f"data: {json.dumps({'type': 'metrics', 'data': {'error': True}})}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+    except Exception as e:
+        logger.debug("UserPromptSubmit hook check failed: %s", e)
+
     _intent = _classify_agent_request(messages, _last_user)
     _low_signal_turn = bool(_intent.get("low_signal"))
     _casual_low_signal_turn = _is_casual_low_signal(_last_user)
@@ -1651,9 +1667,21 @@ async def stream_agent_loop(
 
         # Intra-round context compression.
         # Prevent context ballooning across 10+ tool rounds by compressing
-        # older tool outputs + history once we hit ~85% of soft budget.
+        # Intra-round context compression.
         try:
             from src.context_compression import compress_messages
+
+            # ── PreCompact Hooks (state persist/save before compaction) ──
+            try:
+                from src.hooks.registry import get_registry as _get_hook_reg
+                _hr = _get_hook_reg()
+                if _hr.loaded:
+                    _actions = await _hr.run_pre_compact({"round": round_num, "tokens": estimate_tokens(messages)})
+                    if _actions:
+                        logger.info("[hooks] PreCompact actions: %s", _actions)
+            except Exception as _hook_e:
+                logger.debug("PreCompact hook check failed: %s", _hook_e)
+
             _comp_budget = soft_budget if soft_budget > 0 else 6000
             # Only trigger compression above threshold
             if estimate_tokens(messages) > int(_comp_budget * 0.85):
@@ -1736,3 +1764,16 @@ async def stream_agent_loop(
             logger.warning(f"teacher escalation hook failed: {_esc_err}", exc_info=True)
 
     yield "data: [DONE]\n\n"
+
+    # ── Stop Hooks (auto-save, log, downstream triggers) ──
+    try:
+        from src.hooks.registry import get_registry as _get_hook_reg
+        _hr = _get_hook_reg()
+        if _hr.loaded:
+            _stop_results = await _hr.run_stop(summary=full_response[:500])
+            if _stop_results:
+                for _sr in _stop_results:
+                    if _sr.errors:
+                        logger.info("[hooks] Stop hook errors: %s", _sr.errors)
+    except Exception as _hook_e:
+        logger.debug("Stop hook check failed: %s", _hook_e)
