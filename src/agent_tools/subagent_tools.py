@@ -107,7 +107,7 @@ async def _run_single_subagent(
         if not endpoint:
             return {"goal": goal[:80], "error": "No enabled endpoint for sub-agent"}
         base_url, api_key = resolve_endpoint_runtime(endpoint, owner=owner)
-        model_name = endpoint.default_model or "auto"
+        model_name = "auto"  # let endpoint resolver handle default
         headers = build_headers(api_key, base_url)
     finally:
         db.close()

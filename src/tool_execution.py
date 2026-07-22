@@ -1204,7 +1204,12 @@ def format_tool_result(description: str, result: Dict) -> str:
         else:
             parts.append(result["response"])
     elif "results" in result:
-        parts.append(result["results"])
+        res_val = result["results"]
+        if isinstance(res_val, list):
+            import json
+            parts.append(f"```json\n{json.dumps(res_val, indent=2, default=str)}\n```")
+        else:
+            parts.append(str(res_val))
     elif "session_id" in result and "name" in result:
         parts.append(f"Session created: **{result['name']}** (id: `{result['session_id']}`, model: {result.get('model', 'unknown')})")
     elif "success" in result:
