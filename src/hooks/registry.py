@@ -214,7 +214,6 @@ class HookRegistry:
                             action.command.format(message=user_message),
                             stdout=asyncio.subprocess.DEVNULL,
                             stderr=asyncio.subprocess.PIPE,
-                            timeout=action.timeout,
                         )
                         _, stderr = await asyncio.wait_for(proc.communicate(), timeout=action.timeout)
                         if proc.returncode != 0 and stderr:

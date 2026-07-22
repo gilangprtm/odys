@@ -11,10 +11,36 @@ Results are collected and merged.
 import asyncio
 import json
 import logging
-import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
+
+from src.agent_tools.agent_definitions import get_agent_registry
 
 logger = logging.getLogger(__name__)
+
+# ── constants ──
+
+SUBAGENT_TIMEOUT = 120  # wall-clock seconds per subagent
+
+
+async def _synthesize_results(
+    goal: str,
+    results: List[Dict[str, Any]],
+    owner: Optional[str] = None,
+) -> str:
+    """Call a light LLM to aggregate sub-agent findings into a single answer."""
+    # TODO: Implement LLM-based synthesis using the same endpoint as subagents.
+    # For now, return a simple text merge.
+    parts = []
+    for r in results:
+        g = r.get("goal", "Unknown")
+        resp = r.get("response", "")
+        err = r.get("error")
+        if err:
+            parts.append(f"⚠️ **{g}** (error): {err}")
+        else:
+            parts.append(f"✅ **{g}**: {resp[:500]}")
+    return f"## Synthesis for: {goal}\n\n" + "\n\n---\n\n".join(parts)
+
 
 # Tool scopes — maps readable names to sets of tool names to disable.
 TOOL_SCOPES = {
@@ -207,11 +233,19 @@ async def delegate_task(
             for t in tasks_spec
         ])
 
+        # Synthesize combined answer (FR-4.5)
+        combined_answer = await _synthesize_results(
+            goal=tasks_spec[0].get("goal", "Batch task"),
+            results=results,
+            owner=owner,
+        )
+
         return {
             "sub_agent": True,
             "batch": True,
             "count": len(results),
             "results": results,
+            "synthesis": combined_answer,
         }
 
     # Single task mode
