@@ -93,22 +93,40 @@ async def _run_single_subagent(
     """Run a single sub-agent task and return its result dict."""
     from src.agent_loop.loop import stream_agent_loop
     from src.tool_schemas import FUNCTION_TOOL_SCHEMAS
-    from src.database import SessionLocal, ModelEndpoint
+    from src.database import SessionLocal, ModelEndpoint, Session
     from src.endpoint_resolver import resolve_endpoint_runtime, build_headers
     from src.auth_helpers import owner_filter
     from src.agent_tools.agent_definitions import get_agent_registry
 
     db = SessionLocal()
     try:
-        query = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
-        if owner:
-            query = owner_filter(query, ModelEndpoint, owner)
-        endpoint = query.order_by(ModelEndpoint.id).first()
-        if not endpoint:
-            return {"goal": goal[:80], "error": "No enabled endpoint for sub-agent"}
-        base_url, api_key = resolve_endpoint_runtime(endpoint, owner=owner)
-        model_name = "auto"  # let endpoint resolver handle default
-        headers = build_headers(api_key, base_url)
+        # Prefer parent session's own model/endpoint for consistency
+        if session_id:
+            parent_session = db.query(Session).filter(Session.id == session_id).first()
+        else:
+            parent_session = None
+
+        if parent_session and parent_session.endpoint_url:
+            base_url = parent_session.endpoint_url
+            model_name = parent_session.model or "auto"
+            api_key = None  # parent session headers may contain it
+            # Try to extract api_key from parent session headers
+            try:
+                api_key = (parent_session.headers or {}).get("Authorization", "").replace("Bearer ", "") or None
+            except Exception:
+                pass
+            headers = build_headers(api_key, base_url)
+        else:
+            # Fallback: first enabled ModelEndpoint
+            query = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
+            if owner:
+                query = owner_filter(query, ModelEndpoint, owner)
+            endpoint = query.order_by(ModelEndpoint.id).first()
+            if not endpoint:
+                return {"goal": goal[:80], "error": "No enabled endpoint for sub-agent"}
+            base_url, api_key = resolve_endpoint_runtime(endpoint, owner=owner)
+            model_name = "auto"
+            headers = build_headers(api_key, base_url)
     finally:
         db.close()
 
