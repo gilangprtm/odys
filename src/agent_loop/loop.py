@@ -1715,7 +1715,7 @@ async def stream_agent_loop(
 
     # If the response is completely empty and no tools were executed,
     # yield a fallback message so the user is not left hanging.
-    full_response, _fallback_chunk = _empty_response_fallback(
+    full_response, _fallback_chunk = await _empty_response_fallback(
         full_response, round_reasoning, tool_events,
         messages=messages, endpoint_url=endpoint_url,
         model=actual_model, headers=headers,

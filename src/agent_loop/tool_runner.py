@@ -133,7 +133,7 @@ def _build_base_prompt(
         elif compact:
             agent_prompt = _assemble_prompt(set(TOOL_SECTIONS.keys()), disabled, compact=True, owner=owner)
 
-    # Inject the Level-0 skill index — one line per skill so the agent
+    # Inject the Level-0 skill index - one line per skill so the agent
     # knows what canonical procedures exist. Includes published skills
     # plus teacher-escalation drafts (auto-written when the student
     # fails a task; appear here on the very next turn so the student
@@ -144,7 +144,7 @@ def _build_base_prompt(
     # SECURITY: skill `name` and `description` are user-editable, so the
     # index block is returned SEPARATELY (not appended to agent_prompt).
     # The caller wraps it in untrusted_context_message and ships it as a
-    # user-role message — same treatment as the matched-skills block.
+    # user-role message - same treatment as the matched-skills block.
     skill_index_block = ""
     if not suppress_local_context and not suppress_skills:
         try:
@@ -157,7 +157,7 @@ def _build_base_prompt(
                      "Procedures the assistant should consult before doing domain work. "
                      "Fetch skills with `manage_skills` action=view name=<name> "
                      "when one looks relevant. Entries tagged `(draft)` were written by the "
-                     "teacher-escalation loop after a prior failure — treat them as authoritative "
+                     "teacher-escalation loop after a prior failure - treat them as authoritative "
                      "guidance; if you follow one and it works, that's a good signal the procedure "
                      "is correct. Built-in skills ship with Odys (read-only); user skills live "
                      "under data/skills/ and can be created via auto-learn or manage_skills."]
@@ -169,12 +169,12 @@ def _build_base_prompt(
                 lines.append(f"\n**{cat}**")
                 for s in by_cat[cat]:
                     badge = " *(draft)*" if s.get("status") == "draft" else ""
-                    lines.append(f"- `{s['name']}` — {s['description']}{badge}")
+                    lines.append(f"- `{s['name']}` - {s['description']}{badge}")
             # Only emit block if we have more than the header lines
             if len(lines) > 2:
                 skill_index_block = "\n\n" + "\n".join(lines)
         except Exception as _e:
-            # Skill index is a soft enhancement — never fail prompt assembly on it.
+            # Skill index is a soft enhancement - never fail prompt assembly on it.
             logger.debug(f"Skill-index injection skipped: {_e}")
 
     return agent_prompt, skill_index_block
@@ -210,12 +210,12 @@ def _resolve_tool_blocks(
         # have a reliable structured channel for real tool invocations. When such
         # a model emits no native tool_calls, any ```bash/```python/```json fence
         # in its prose is virtually always an illustrative example for the user
-        # (e.g. "here's the command you'd run"), not an attempted tool call —
+        # (e.g. "here's the command you'd run"), not an attempted tool call -
         # executing it causes accidental runs and clarification loops (#3222).
         #
         # Gate ONLY that fenced-block pattern for native models, not the whole
         # parser: explicit [TOOL_CALL]/<invoke>/<tool_code>/DSML markup that
-        # leaks into content as text is never illustrative — it's a real call
+        # leaks into content as text is never illustrative - it's a real call
         # the model couldn't emit on its structured channel (e.g. DeepSeek-V
         # falling back to DSML). Dropping the whole parser would silently lose
         # those too. Non-native / textual-only models keep every pattern,
@@ -245,14 +245,14 @@ def _append_tool_results(
     """Append tool execution results back into the message history for the next LLM round.
 
     `round_reasoning` (DeepSeek / vLLM reasoning-parser deltas) is echoed
-    back via `reasoning_content` on the assistant message — DeepSeek's API
+    back via `reasoning_content` on the assistant message - DeepSeek's API
     rejects follow-up requests in thinking mode that don't include the
     prior reasoning.
 
     NOTE: it is NOT universally ignored. Nemotron's chat template re-injects
     EVERY prior `reasoning_content` as a <think> block, and this agent loop is
     trimmed only once (before the loop), so across rounds the reasoning piles
-    up unbounded — bloating context and feeding the model its own prior
+    up unbounded - bloating context and feeding the model its own prior
     reasoning, which reinforces repetition/looping. So keep reasoning_content
     on the MOST RECENT assistant turn only: enough for DeepSeek continuity,
     without the per-round accumulation.
@@ -306,7 +306,7 @@ def _append_tool_results(
         # Tool output (shell/python stdout, file reads, fetched pages, email
         # bodies, MCP results) is sourced from outside the server. Wrap it as
         # untrusted data so prompt-injection inside a tool result is treated as
-        # data, not instructions — same hardening as skills (#788) and the
+        # data, not instructions - same hardening as skills (#788) and the
         # web/RAG context. THREAT_MODEL.md lists tool output as a surface that
         # must go through untrusted_context_message.
         messages.append(
@@ -343,7 +343,7 @@ def _compute_final_metrics(
         input_tokens = len(input_content) // 4
         output_tokens = len(full_response) // 4
     # Prefer the backend's true generation speed (llama.cpp
-    # timings.predicted_per_second) — pure decode, no prefill/tool/network time.
+    # timings.predicted_per_second) - pure decode, no prefill/tool/network time.
     # Fall back to tokens/wall-clock only when the backend didn't report it
     # (e.g. cloud APIs without timings); that figure reads low because
     # total_duration includes prefill + agent overhead.
@@ -362,7 +362,7 @@ def _compute_final_metrics(
         "output_tokens": output_tokens,
         "tokens_per_second": round(tps, 2),
         # True decode speed when the backend reported it; "computed" = the
-        # tokens/wall-clock fallback (reads low — includes prefill/overhead).
+        # tokens/wall-clock fallback (reads low - includes prefill/overhead).
         "tps_source": "backend" if (backend_gen_tps and backend_gen_tps > 0) else "computed",
         "total_tokens": input_tokens + output_tokens,
         "context_length": context_length,
@@ -393,7 +393,7 @@ _VERIFIER_EFFECTFUL_TOOLS = {
     "create_document", "update_document", "edit_document",
     "bash", "python", "write_file",
 }
-_VERIFIER_MAX_ROUNDS = 2  # cap re-verify cycles per turn — never loop forever
+_VERIFIER_MAX_ROUNDS = 2  # cap re-verify cycles per turn - never loop forever
 
 
 def _build_actions_snapshot(tool_events: list, limit: int = 8000) -> str:
@@ -435,7 +435,7 @@ async def _run_verifier_subagent(
         f"<actions_taken>\n{actions_snapshot[:8000]}\n</actions_taken>\n\n"
         "<checklist>\n"
         "1. Every concrete deliverable the request asked for was actually produced\n"
-        "2. Outputs/edits match what was asked — nothing missing, no extra or unrequested changes\n"
+        "2. Outputs/edits match what was asked - nothing missing, no extra or unrequested changes\n"
         "3. Tool results show success, not errors or empty output that got ignored\n"
         "4. Anything the request said to leave alone was left unchanged\n"
         "</checklist>\n\n"
@@ -464,7 +464,7 @@ async def _run_verifier_subagent(
     return [r.strip() for r in reasons.split(";") if r.strip()]
 
 
-def _empty_response_fallback(
+async def _empty_response_fallback(
     full_response: str,
     round_reasoning: str,
     tool_events: list,
@@ -475,25 +475,13 @@ def _empty_response_fallback(
     temperature: float = 0.3,
     max_tokens: int = 4096,
 ) -> tuple:
-    """Return (final_response, sse_chunk_or_none) for the end-of-loop empty-response guard.
+    """Return (final_response, sse_chunk_or_none) for the end-of-loop empty-response guard."""
 
-    When a thinking model routes all tokens to reasoning_content (leaving
-    content=""), full_response is empty but round_reasoning has content.
-    The reasoning was already streamed as {thinking:true} chunks — do not
-    re-emit it as a normal delta.  Just persist it and yield nothing.
-
-    If we have tool_events but no final answer, attempt ONE synthesis call
-    to produce a coherent response from gathered data before giving up.
-
-    Returns:
-        (final_response: str, chunk: str | None)
-            chunk is the SSE string to yield, or None if nothing should be emitted.
-    """
     if full_response.strip():
         return full_response, None
     if round_reasoning.strip() and not tool_events:
         return round_reasoning, None
-        
+
     # Attempt synthesis if we have tool events (data gathered) but no text answer
     if tool_events and messages and endpoint_url:
         try:
@@ -504,29 +492,18 @@ def _empty_response_fallback(
                 "content": (
                     "Using ONLY the information already gathered above, write "
                     "the final answer for the user now. Do NOT call any tools, "
-                    "do NOT explain your reasoning — output the finished response "
+                    "do NOT explain your reasoning - output the finished response "
                     "directly. If some data couldn't be fetched, just work with "
                     "what you have and note what's missing in one short line."
                 ),
             }]
-            
-            # Run async function in synchronous loop context
-            try:
-                loop = asyncio.get_running_loop()
-                _synth_raw = loop.run_until_complete(
-                    llm_call_async(
-                        url=endpoint_url, model=model, messages=_synth_messages,
-                        headers=headers, temperature=temperature, max_tokens=max_tokens, timeout=45,
-                    )
-                )
-            except RuntimeError:
-                _synth_raw = asyncio.run(
-                    llm_call_async(
-                        url=endpoint_url, model=model, messages=_synth_messages,
-                        headers=headers, temperature=temperature, max_tokens=max_tokens, timeout=45,
-                    )
-                )
-                
+
+            # Use await directly since this function is now async
+            _synth_raw = await llm_call_async(
+                url=endpoint_url, model=model, messages=_synth_messages,
+                headers=headers, temperature=temperature, max_tokens=max_tokens, timeout=45,
+            )
+
             from src.agent_loop.loop import strip_tool_blocks, _strip_think_blocks
             _synth = _strip_think_blocks(strip_tool_blocks(_synth_raw or "")).strip()
             if _synth:
@@ -544,17 +521,17 @@ def _empty_response_fallback(
 
 
 PLAN_MODE_DIRECTIVE = (
-    "## PLAN MODE — OVERRIDES EVERYTHING ELSE BELOW\n"
+    "## PLAN MODE - OVERRIDES EVERYTHING ELSE BELOW\n"
     "You are in PLAN MODE. Your ONLY job this turn is to PROPOSE a plan. You have "
     "NOT done anything yet. Do NOT claim you created, wrote, ran, sent, or changed "
-    "anything — that would be a lie.\n"
+    "anything - that would be a lie.\n"
     "\n"
-    "ABSOLUTE RULE — DO NOT MUTATE ANYTHING. Every write/state-changing tool, "
+    "ABSOLUTE RULE - DO NOT MUTATE ANYTHING. Every write/state-changing tool, "
     "including the shell (`bash`/`python`), is disabled this turn and will be "
-    "rejected — only read-only tools remain available. Use the read-only tools "
+    "rejected - only read-only tools remain available. Use the read-only tools "
     "listed below (read files, search code, browse the project, web lookups) to "
     "ground the plan. If the task is 'write a file', your plan is to DESCRIBE "
-    "writing it — you do NOT write it now.\n"
+    "writing it - you do NOT write it now.\n"
     "\n"
     "OUTPUT: present the plan as a GitHub-style checklist, one concrete step per line:\n"
     "- [ ] first action you will take once approved\n"
@@ -569,15 +546,15 @@ def build_active_plan_note(approved_plan: str) -> str:
     """System note that pins an approved plan during execution.
 
     Sent back by the frontend each turn so a long plan on a weak model survives
-    history truncation — the agent can always re-read it. Returns "" for empty
+    history truncation - the agent can always re-read it. Returns "" for empty
     input.
     """
     if not approved_plan or not approved_plan.strip():
         return ""
     return (
-        "## ACTIVE PLAN (approved — execute this)\n"
+        "## ACTIVE PLAN (approved - execute this)\n"
         "You are executing a plan the user already approved. THE FULL PLAN IS "
-        "BELOW — it is always provided here every turn. Do NOT say you lost it, "
+        "BELOW - it is always provided here every turn. Do NOT say you lost it, "
         "and do NOT look for it in tasks, notes, memory, files, or the API; just "
         "read it below. Work through it IN ORDER. After finishing each step, call "
         "the `update_plan` tool with the full checklist and that step marked "
@@ -591,13 +568,13 @@ def build_active_plan_note(approved_plan: str) -> str:
 
 
 def _detect_runaway_call(call_freq, threshold=5):
-    """Tool name of a call signature repeated >= ``threshold`` times — a real
+    """Tool name of a call signature repeated >= ``threshold`` times - a real
     runaway loop. Counts IDENTICAL repeated calls (same tool AND args), so a
     legitimate batch of distinct calls to one tool (e.g. creating 18 calendar
     events at once) is NOT flagged. Returns ``None`` when nothing is runaway.
 
     ``call_freq`` is a Counter keyed by ``"{tool_type}:{content[:120]}"``.
-    Agent discipline: threshold lowered from 15 → 5 so loops die earlier.
+    Agent discipline: threshold lowered from 15 -> 5 so loops die earlier.
     """
     sig = next((s for s, n in call_freq.items() if n >= threshold), None)
     return sig.split(":", 1)[0] if sig else None
