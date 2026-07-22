@@ -672,7 +672,9 @@ async def stream_agent_loop(
                         and t.get("name") not in disabled_tools
                     ]
 
-            # Append skill schemas (dynamic ECC skills)
+            # Append skill schemas (dynamic ECC skills) - Cap to prevent model overload.
+            # Sending all 278 skill schemas causes small models (e.g. fusion, r1-free)
+            # to return empty responses due to prompt token bloat.
             try:
                 from src.skills.registry import get_registry
                 _reg = get_registry()
@@ -683,6 +685,11 @@ async def stream_agent_loop(
                             s for s in _skill_schemas
                             if s.get("function", {}).get("name") not in disabled_tools
                         ]
+                    # Limit schemas: send at most 30 skill schemas to avoid overwhelming the model.
+                    # The full list is available in the system prompt's skill-index block.
+                    _MAX_SKILL_SCHEMAS = 30
+                    if len(_skill_schemas) > _MAX_SKILL_SCHEMAS:
+                        _skill_schemas = _skill_schemas[:_MAX_SKILL_SCHEMAS]
                     all_tool_schemas.extend(_skill_schemas)
             except Exception:
                 pass

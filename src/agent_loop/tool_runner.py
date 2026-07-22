@@ -517,6 +517,7 @@ async def _empty_response_fallback(
         return round_reasoning, None
 
     _error_msg = "The model returned an empty response. Please try again or switch to a different model."
+    logger.warning(f"[agent] empty response fallback triggered: full_response empty, round_reasoning empty, tool_events empty")
     return _error_msg, f'data: {json.dumps({"delta": _error_msg})}\n\n'
 
 
