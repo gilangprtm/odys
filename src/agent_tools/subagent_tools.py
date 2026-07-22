@@ -103,7 +103,7 @@ async def _run_single_subagent(
         query = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
         if owner:
             query = owner_filter(query, ModelEndpoint, owner)
-        endpoint = query.order_by(ModelEndpoint.position).first()
+        endpoint = query.order_by(ModelEndpoint.id).first()
         if not endpoint:
             return {"goal": goal[:80], "error": "No enabled endpoint for sub-agent"}
         base_url, api_key = resolve_endpoint_runtime(endpoint, owner=owner)
@@ -250,20 +250,33 @@ async def delegate_task(
                 timeout=t.get("timeout", SUBAGENT_TIMEOUT),
             )
             for t in tasks_spec
-        ])
+        ], return_exceptions=True)
+
+        # Replace exceptions with error dicts
+        final_results = []
+        for i, r in enumerate(results):
+            if isinstance(r, Exception):
+                logger.warning(f"Sub-agent task {i} failed with exception: {r}")
+                final_results.append({
+                    "goal": tasks_spec[i].get("goal", "Untitled"),
+                    "output": str(r),
+                    "error": True,
+                })
+            else:
+                final_results.append(r)
 
         # Synthesize combined answer (FR-4.5)
         combined_answer = await _synthesize_results(
             goal=tasks_spec[0].get("goal", "Batch task"),
-            results=results,
+            results=final_results,
             owner=owner,
         )
 
         return {
             "sub_agent": True,
             "batch": True,
-            "count": len(results),
-            "results": results,
+            "count": len(final_results),
+            "results": final_results,
             "synthesis": combined_answer,
         }
 
