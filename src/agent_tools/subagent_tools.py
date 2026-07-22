@@ -182,22 +182,31 @@ async def _run_single_subagent(
             workload="background",
         )
 
-        async for event in asyncio.wait_for(_sub_loop, timeout=timeout):
-            if event.startswith("data: "):
-                payload = event[6:]
-                if payload == "[DONE]":
-                    break
-                try:
-                    data = json.loads(payload)
-                    evt_type = data.get("type")
-                    if evt_type == "metrics":
-                        sub_metrics = data.get("data", {})
-                    elif "delta" in data:
-                        sub_output.append(data["delta"])
-                    elif evt_type == "tool_event":
-                        sub_tool_events.append(data)
-                except (json.JSONDecodeError, TypeError):
-                    pass
+        async def _consume_sub_loop():
+            nonlocal sub_metrics
+            local_output: List[str] = []
+            local_events: List[Dict] = []
+            async for event in _sub_loop:
+                if event.startswith("data: "):
+                    payload = event[6:]
+                    if payload == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(payload)
+                        evt_type = data.get("type")
+                        if evt_type == "metrics":
+                            sub_metrics = data.get("data", {})
+                        elif "delta" in data:
+                            local_output.append(data["delta"])
+                        elif evt_type == "tool_event":
+                            local_events.append(data)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+            return local_output, local_events
+
+        sub_output, sub_tool_events = await asyncio.wait_for(
+            _consume_sub_loop(), timeout=timeout
+        )
 
         final = "".join(sub_output)
         if not final.strip():
