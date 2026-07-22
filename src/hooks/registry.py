@@ -53,6 +53,34 @@ class HookResult:
     errors: List[str] = field(default_factory=list)
 
 
+# Helper for running inline Python code
+def _run_python_code(code: str, context: dict, timeout: int = 10) -> None:
+    """Executes inline python code inside a restricted context dictionary."""
+    if not code.strip():
+        return
+    import threading
+    
+    def target():
+        exec(code, {}, context)
+        
+    t = threading.Thread(target=target, daemon=True)
+    t.start()
+    t.join(timeout=timeout)
+    if t.is_alive():
+        raise TimeoutError("Python hook execution timed out")
+
+
+async def _run_python_code_async(code: str, context: dict, timeout: int = 10) -> None:
+    """Async wrapper for running python hook code in executor."""
+    if not code.strip():
+        return
+    loop = asyncio.get_running_loop()
+    await asyncio.wait_for(
+        loop.run_in_executor(None, lambda: exec(code, {}, context)),
+        timeout=timeout,
+    )
+
+
 class HookRegistry:
     """Loads, matches, and executes hooks from hook configuration files."""
 
@@ -118,6 +146,12 @@ class HookRegistry:
                                     type="block",
                                     message=act.get("message", "Blocked by hook"),
                                 ))
+                            elif act_type == "python":
+                                actions.append(HookAction(
+                                    type="python",
+                                    code=act.get("code", ""),
+                                    timeout=act.get("timeout", HOOK_TIMEOUT),
+                                ))
 
                     if actions:
                         hook = Hook(event=event_type, matcher=matcher_expr, actions=actions)
@@ -157,6 +191,12 @@ class HookRegistry:
                         logger.warning("Hook command timed out: %s", action.command)
                     except Exception as e:
                         logger.warning("Hook command failed: %s", e)
+                elif action.type == "python":
+                    _run_python_code(
+                        action.code,
+                        {"tool_name": tool_name, "tool_args": tool_args},
+                        timeout=action.timeout,
+                    )
 
         return None
 
@@ -190,6 +230,15 @@ class HookRegistry:
                             hook_result.errors.append("timeout")
                     except Exception as e:
                         hook_result.errors.append(str(e))
+                elif action.type == "python":
+                    try:
+                        await _run_python_code_async(
+                            action.code,
+                            {"tool_name": tool_name, "tool_args": tool_args, "tool_result": tool_result},
+                            timeout=action.timeout,
+                        )
+                    except Exception as e:
+                        hook_result.errors.append(f"python: {e}")
             results.append(hook_result)
         return results
 
@@ -223,6 +272,12 @@ class HookRegistry:
                         logger.warning("UserPromptSubmit hook timed out")
                     except Exception as e:
                         logger.warning("UserPromptSubmit hook failed: %s", e)
+                elif action.type == "python":
+                    try:
+                        ctx = {"user_message": user_message, "session_id": session_id, "errors": errors}
+                        await _run_python_code_async(action.code, ctx, timeout=action.timeout)
+                    except Exception as e:
+                        logger.warning("UserPromptSubmit python hook failed: %s", e)
         return errors
 
     async def run_stop(self, summary: Optional[str] = None) -> List[HookResult]:
@@ -251,6 +306,12 @@ class HookRegistry:
                         hook_result.errors.append("timeout")
                     except Exception as e:
                         hook_result.errors.append(str(e))
+                elif action.type == "python":
+                    try:
+                        ctx = {"summary": summary, "errors": hook_result.errors}
+                        await _run_python_code_async(action.code, ctx, timeout=action.timeout)
+                    except Exception as e:
+                        hook_result.errors.append(f"python: {e}")
             results.append(hook_result)
         return results
 
@@ -283,6 +344,12 @@ class HookRegistry:
                         logger.warning("PreCompact hook timed out")
                     except Exception as e:
                         logger.warning("PreCompact hook failed: %s", e)
+                elif action.type == "python":
+                    try:
+                        ctx = {"context_stats": context_stats or {}, "actions_taken": actions_taken}
+                        _run_python_code(action.code, ctx, timeout=action.timeout)
+                    except Exception as e:
+                        logger.warning("PreCompact python hook failed: %s", e)
         return actions_taken
 
     async def run_notification(self, notification_type: str, payload: Any = None) -> List[str]:
@@ -316,6 +383,12 @@ class HookRegistry:
                         results.append("timeout")
                     except Exception as e:
                         results.append(f"error: {e}")
+                elif action.type == "python":
+                    try:
+                        ctx = {"notification_type": notification_type, "payload": payload, "results": results}
+                        await _run_python_code_async(action.code, ctx, timeout=action.timeout)
+                    except Exception as e:
+                        results.append(f"python: {e}")
         return results
 
 

@@ -69,11 +69,20 @@ def parse_skill_md(text: str, path: Optional[str] = None) -> Optional[Skill]:
     else:
         tools = []
 
+    requires_raw = meta.get("requires") or []
+    if isinstance(requires_raw, str):
+        requires = [r.strip() for r in requires_raw.split(",") if r.strip()]
+    elif isinstance(requires_raw, list):
+        requires = [str(r).strip() for r in requires_raw if str(r).strip()]
+    else:
+        requires = []
+
     return Skill(
         name=name,
         description=description,
         origin=str(meta.get("origin") or "ecc@^2.0"),
         tools=tools,
+        requires=requires,
         when=str(meta.get("when") or ""),
         content=body.strip(),
         raw_frontmatter=meta,

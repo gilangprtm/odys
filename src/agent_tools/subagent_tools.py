@@ -88,6 +88,7 @@ async def _run_single_subagent(
     max_tokens: int = 4096,
     role: str = "leaf",
     agent_type: Optional[str] = None,
+    timeout: int = 120,  # wall-clock seconds (FR-4.4)
 ) -> Dict[str, Any]:
     """Run a single sub-agent task and return its result dict."""
     from src.agent_loop.loop import stream_agent_loop
@@ -145,9 +146,10 @@ async def _run_single_subagent(
 
     sub_output: List[str] = []
     sub_tool_events: List[Dict] = []
+    sub_metrics: Optional[Dict] = None  # NFR-4.2 token tracking
 
     try:
-        async for event in stream_agent_loop(
+        _sub_loop = stream_agent_loop(
             endpoint_url=base_url,
             model=model_name,
             messages=sub_messages,
@@ -159,16 +161,21 @@ async def _run_single_subagent(
             session_id=sub_id,
             disabled_tools=disabled_tools,
             workload="background",
-        ):
+        )
+
+        async for event in asyncio.wait_for(_sub_loop, timeout=timeout):
             if event.startswith("data: "):
                 payload = event[6:]
                 if payload == "[DONE]":
                     break
                 try:
                     data = json.loads(payload)
-                    if "delta" in data:
+                    evt_type = data.get("type")
+                    if evt_type == "metrics":
+                        sub_metrics = data.get("data", {})
+                    elif "delta" in data:
                         sub_output.append(data["delta"])
-                    elif data.get("type") == "tool_event":
+                    elif evt_type == "tool_event":
                         sub_tool_events.append(data)
                 except (json.JSONDecodeError, TypeError):
                     pass
@@ -176,11 +183,22 @@ async def _run_single_subagent(
         final = "".join(sub_output)
         if not final.strip():
             final = f"Task completed with {len(sub_tool_events)} tool call(s)."
-        return {
+
+        result: Dict[str, Any] = {
             "goal": goal[:200],
             "response": final.strip()[:8000],
             "tool_calls": len(sub_tool_events),
         }
+
+        # Token accounting (NFR-4.2)
+        if sub_metrics:
+            result["input_tokens"] = sub_metrics.get("input_tokens", 0)
+            result["output_tokens"] = sub_metrics.get("output_tokens", 0)
+
+        return result
+    except asyncio.TimeoutError:
+        logger.warning("Sub-agent '%s' timed out after %ss", goal[:40], timeout)
+        return {"goal": goal[:200], "error": f"Timed out after {timeout}s"}
     except Exception as e:
         logger.error("Sub-agent '%s' failed: %s", goal[:60], e)
         return {"goal": goal[:200], "error": str(e)[:500]}
@@ -229,6 +247,7 @@ async def delegate_task(
                 owner=owner,
                 role=t.get("role", "leaf"),
                 agent_type=t.get("agent") or t.get("type"),
+                timeout=t.get("timeout", SUBAGENT_TIMEOUT),
             )
             for t in tasks_spec
         ])
