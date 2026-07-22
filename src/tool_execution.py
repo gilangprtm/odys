@@ -1206,7 +1206,6 @@ def format_tool_result(description: str, result: Dict) -> str:
     elif "results" in result:
         res_val = result["results"]
         if isinstance(res_val, list):
-            import json
             parts.append(f"```json\n{json.dumps(res_val, indent=2, default=str)}\n```")
         else:
             parts.append(str(res_val))
